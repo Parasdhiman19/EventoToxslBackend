@@ -1,14 +1,30 @@
+import secrets
+from datetime import timedelta
+from django.utils import timezone
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 
-from .models import OrganizerProfile, SettlementAccount, StudioStaffMember
+import os
+from .models import User, OrganizerProfile, SettlementAccount, StudioStaffMember, EmailVerificationOTP, PasswordResetToken
+from .constants import USER, MANAGER
 from .permissions import IsManagerUser
+from .services.brevo_service import send_otp_email, send_password_reset_otp_email, send_password_reset_link_email
 from .serializers import (
     UserSerializer,
+    UserProfileUpdateSerializer,
+    ChangePasswordSerializer,
     SignupSerializer,
     LoginSerializer,
+    RequestSignupOTPSerializer,
+    VerifySignupOTPSerializer,
+    RequestPasswordResetOTPSerializer,
+    VerifyPasswordResetSerializer,
+    RequestPasswordResetLinkSerializer,
+    ValidateResetTokenSerializer,
+    ConfirmPasswordResetSerializer,
+    ResendOTPSerializer,
     OrganizerProfileSerializer,
     SettlementAccountSerializer,
     BecomeOrganizerSerializer,
@@ -37,6 +53,535 @@ def set_refresh_cookie(response, refresh_token):
         max_age=COOKIE_MAX_AGE,
         path='/',
     )
+
+
+class RequestSignupOTPView(views.APIView):
+    """
+    Validates signup details and generates a 6-digit OTP sent via Brevo.
+    Enforces a 60-second resend cooldown and hourly rate limit (max 5/hr).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = RequestSignupOTPSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        name = serializer.validated_data.get('fullName') or serializer.validated_data.get('full_name') or ''
+
+        now = timezone.now()
+
+        # Check resend cooldown on existing active OTP
+        latest_active_otp = EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_SIGNUP,
+            is_used=False
+        ).first()
+
+        if latest_active_otp and not latest_active_otp.can_resend:
+            wait_seconds = int((latest_active_otp.resend_unlock_at - now).total_seconds())
+            wait_seconds = max(1, wait_seconds)
+            return Response({
+                'detail': f'Please wait {wait_seconds}s before requesting a new code.',
+                'resend_after_seconds': wait_seconds
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Rate limiting: max 5 OTP requests in the last hour for this email
+        one_hour_ago = now - timedelta(hours=1)
+        hourly_count = EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_SIGNUP,
+            created_at__gte=one_hour_ago
+        ).count()
+
+        if hourly_count >= 5:
+            return Response({
+                'detail': 'Maximum verification requests exceeded for this hour. Please try again later.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Invalidate previous unused signup OTPs for this email
+        EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_SIGNUP,
+            is_used=False
+        ).update(is_used=True)
+
+        # Generate secure 6-digit code
+        raw_otp = f"{secrets.randbelow(900000) + 100000}"
+
+        # Create record
+        otp_record = EmailVerificationOTP(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_SIGNUP,
+            expires_at=now + timedelta(minutes=5),
+            resend_unlock_at=now + timedelta(seconds=60),
+            attempts=0,
+            max_attempts=5,
+            is_used=False
+        )
+        otp_record.set_otp(raw_otp)
+        otp_record.save()
+
+        # Send Email via Brevo
+        sent_success, msg = send_otp_email(
+            to_email=email,
+            otp_code=raw_otp,
+            recipient_name=name
+        )
+
+        if not sent_success:
+            # If sending failed, invalidate record and return error
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used'])
+            return Response({'detail': msg}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'message': f'A 6-digit verification code has been sent to {email}.',
+            'email': email,
+            'resend_after_seconds': 60,
+            'expires_in_seconds': 300,
+        }, status=status.HTTP_200_OK)
+
+
+class VerifySignupOTPView(views.APIView):
+    """
+    Verifies the 6-digit OTP code, checks attempt limits & expiry,
+    and upon success creates the User record and issues JWT tokens.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = VerifySignupOTPSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        input_otp = serializer.validated_data['otp']
+        name = serializer.validated_data.get('fullName') or serializer.validated_data.get('full_name') or ''
+        password = serializer.validated_data['password']
+        req_role = str(serializer.validated_data.get('role', USER)).lower()
+        role_val = MANAGER if req_role in ['manager', 'organizer', '2'] else USER
+
+        now = timezone.now()
+
+        # Fetch latest unused OTP record
+        otp_record = EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_SIGNUP,
+            is_used=False
+        ).first()
+
+        if not otp_record:
+            return Response({
+                'detail': 'No active verification code found for this email. Please request a new one.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check expiry
+        if otp_record.is_expired:
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used'])
+            return Response({
+                'detail': 'Verification code has expired. Please request a new code.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check max attempts
+        if otp_record.attempts >= otp_record.max_attempts:
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used'])
+            return Response({
+                'detail': 'Maximum verification attempts exceeded. Please request a new code.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Verify OTP code
+        if not otp_record.check_otp(input_otp):
+            otp_record.attempts += 1
+            if otp_record.attempts >= otp_record.max_attempts:
+                otp_record.is_used = True
+                otp_record.save(update_fields=['attempts', 'is_used'])
+                return Response({
+                    'detail': 'Incorrect verification code. Maximum attempts reached. Please request a new code.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            otp_record.save(update_fields=['attempts'])
+            remaining = otp_record.remaining_attempts
+            return Response({
+                'detail': f'Incorrect verification code. {remaining} {"attempt" if remaining == 1 else "attempts"} remaining.',
+                'remaining_attempts': remaining
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Success - Mark OTP as used
+        otp_record.is_used = True
+        otp_record.save(update_fields=['is_used'])
+
+        # Double check if user already exists
+        if User.objects.filter(email__iexact=email).exists():
+            return Response({
+                'detail': 'An account with this email already exists.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create user account
+        user = User.objects.create_user(
+            email=email,
+            password=password,
+            full_name=name,
+            role=role_val
+        )
+
+        if user.role == MANAGER:
+            OrganizerProfile.objects.get_or_create(
+                user=user,
+                defaults={
+                    'organization_name': f"{user.full_name}'s Studio" if user.full_name else "Nexus Productions Studio",
+                }
+            )
+
+        tokens = get_tokens_for_user(user)
+
+        response = Response({
+            'user': UserSerializer(user).data,
+            'access': tokens['access'],
+            'message': 'Account verified and created successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+        set_refresh_cookie(response, tokens['refresh'])
+        return response
+
+
+class RequestPasswordResetOTPView(views.APIView):
+    """
+    Validates user email, generates a 6-digit password reset OTP, and dispatches it via Brevo.
+    Enforces a 60s cooldown and hourly rate limit (max 5/hr).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = RequestPasswordResetOTPSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        user = User.objects.filter(email__iexact=email).first()
+
+        now = timezone.now()
+
+        # Check resend cooldown on existing active reset OTP
+        latest_active_otp = EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_RESET_PASSWORD,
+            is_used=False
+        ).first()
+
+        if latest_active_otp and not latest_active_otp.can_resend:
+            wait_seconds = int((latest_active_otp.resend_unlock_at - now).total_seconds())
+            wait_seconds = max(1, wait_seconds)
+            return Response({
+                'detail': f'Please wait {wait_seconds}s before requesting a new code.',
+                'resend_after_seconds': wait_seconds
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Rate limiting: max 5 requests per hour
+        one_hour_ago = now - timedelta(hours=1)
+        hourly_count = EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_RESET_PASSWORD,
+            created_at__gte=one_hour_ago
+        ).count()
+
+        if hourly_count >= 5:
+            return Response({
+                'detail': 'Maximum password reset requests exceeded for this hour. Please try again later.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Invalidate previous unused reset OTPs for this email
+        EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_RESET_PASSWORD,
+            is_used=False
+        ).update(is_used=True)
+
+        # Generate secure 6-digit code
+        raw_otp = f"{secrets.randbelow(900000) + 100000}"
+
+        # Create record
+        otp_record = EmailVerificationOTP(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_RESET_PASSWORD,
+            expires_at=now + timedelta(minutes=5),
+            resend_unlock_at=now + timedelta(seconds=60),
+            attempts=0,
+            max_attempts=5,
+            is_used=False
+        )
+        otp_record.set_otp(raw_otp)
+        otp_record.save()
+
+        # Send Email via Brevo
+        sent_success, msg = send_password_reset_otp_email(
+            to_email=email,
+            otp_code=raw_otp,
+            recipient_name=getattr(user, 'full_name', '')
+        )
+
+        if not sent_success:
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used'])
+            return Response({'detail': msg}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'message': f'A 6-digit password reset code has been sent to {email}.',
+            'email': email,
+            'resend_after_seconds': 60,
+            'expires_in_seconds': 300,
+        }, status=status.HTTP_200_OK)
+
+
+class VerifyPasswordResetView(views.APIView):
+    """
+    Verifies the password reset OTP, updates the user's password, marks OTP as used,
+    and returns JWT credentials for instant auto-login.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = VerifyPasswordResetSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        input_otp = serializer.validated_data['otp']
+
+        user = User.objects.filter(email__iexact=email).first()
+        if not user or not user.is_active:
+            return Response({
+                'detail': 'Account not found or is currently disabled.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch latest unused reset OTP record
+        otp_record = EmailVerificationOTP.objects.filter(
+            email=email,
+            purpose=EmailVerificationOTP.PURPOSE_RESET_PASSWORD,
+            is_used=False
+        ).first()
+
+        if not otp_record:
+            return Response({
+                'detail': 'No active verification request found for this email. Please request a new code.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check expiry
+        if otp_record.is_expired:
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used'])
+            return Response({
+                'detail': 'Verification code has expired. Please request a new code.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check max attempts
+        if otp_record.attempts >= otp_record.max_attempts:
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used'])
+            return Response({
+                'detail': 'Maximum verification attempts exceeded. Please request a new code.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Verify OTP code
+        if not otp_record.check_otp(input_otp):
+            otp_record.attempts += 1
+            if otp_record.attempts >= otp_record.max_attempts:
+                otp_record.is_used = True
+                otp_record.save(update_fields=['attempts', 'is_used'])
+                return Response({
+                    'detail': 'Incorrect code. Maximum attempts reached. Please request a new code.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            otp_record.save(update_fields=['attempts'])
+            remaining = otp_record.remaining_attempts
+            return Response({
+                'detail': f'Incorrect verification code. {remaining} {"attempt" if remaining == 1 else "attempts"} remaining.',
+                'remaining_attempts': remaining
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mark OTP as used
+        otp_record.is_used = True
+        otp_record.save(update_fields=['is_used'])
+
+        # Issue JWT tokens for instant auto-login (Password is NOT changed)
+        tokens = get_tokens_for_user(user)
+
+        response = Response({
+            'user': UserSerializer(user).data,
+            'access': tokens['access'],
+            'message': 'Account verified successfully! You are now logged in.'
+        }, status=status.HTTP_200_OK)
+
+        set_refresh_cookie(response, tokens['refresh'])
+        return response
+
+
+class RequestPasswordResetLinkView(views.APIView):
+    """
+    Validates user email, generates a secure 32-byte token, and sends a password reset link email via Brevo.
+    Enforces a 60s cooldown and hourly rate limit (max 5/hr).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = RequestPasswordResetLinkSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        user = User.objects.filter(email__iexact=email).first()
+
+        now = timezone.now()
+
+        # Check resend cooldown on existing active reset token
+        latest_token = PasswordResetToken.objects.filter(
+            email=email,
+            is_used=False
+        ).first()
+
+        if latest_token and not latest_token.can_resend:
+            wait_seconds = int((latest_token.resend_unlock_at - now).total_seconds())
+            wait_seconds = max(1, wait_seconds)
+            return Response({
+                'detail': f'Please wait {wait_seconds}s before requesting a new reset link.',
+                'resend_after_seconds': wait_seconds
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Rate limiting: max 5 requests per hour
+        one_hour_ago = now - timedelta(hours=1)
+        hourly_count = PasswordResetToken.objects.filter(
+            email=email,
+            created_at__gte=one_hour_ago
+        ).count()
+
+        if hourly_count >= 5:
+            return Response({
+                'detail': 'Maximum password reset link requests exceeded for this hour. Please try again later.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Invalidate previous unused reset tokens for this email
+        PasswordResetToken.objects.filter(
+            email=email,
+            is_used=False
+        ).update(is_used=True)
+
+        # Generate cryptographically secure token
+        raw_token = secrets.token_urlsafe(32)
+
+        # Create record
+        token_record = PasswordResetToken(
+            user=user,
+            email=email,
+            expires_at=now + timedelta(minutes=15),
+            resend_unlock_at=now + timedelta(seconds=60),
+            is_used=False
+        )
+        token_record.set_token(raw_token)
+        token_record.save()
+
+        # Build reset link URL
+        frontend_base_url = os.getenv('FRONTEND_URL') or 'http://localhost:5173'
+        frontend_base_url = frontend_base_url.rstrip('/')
+        reset_url = f"{frontend_base_url}/account/reset-password?token={raw_token}&email={email}"
+
+        # Send Email via Brevo
+        sent_success, msg = send_password_reset_link_email(
+            to_email=email,
+            reset_url=reset_url,
+            recipient_name=getattr(user, 'full_name', '')
+        )
+
+        if not sent_success:
+            token_record.is_used = True
+            token_record.save(update_fields=['is_used'])
+            return Response({'detail': msg}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'message': f'A password reset link has been sent to {email}.',
+            'email': email,
+            'resend_after_seconds': 60,
+            'expires_in_seconds': 900,
+        }, status=status.HTTP_200_OK)
+
+
+class ValidateResetTokenView(views.APIView):
+    """
+    Validates whether a reset token is still active and valid on page load.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = ValidateResetTokenSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        raw_token = serializer.validated_data['token']
+
+        token_record = PasswordResetToken.objects.filter(
+            email=email,
+            is_used=False
+        ).first()
+
+        if not token_record or token_record.is_expired or not token_record.check_token(raw_token):
+            return Response({
+                'valid': False,
+                'detail': 'This password reset link is invalid or has expired. Please request a new one.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'valid': True,
+            'email': email,
+            'message': 'Reset link is valid.'
+        }, status=status.HTTP_200_OK)
+
+
+class ConfirmPasswordResetView(views.APIView):
+    """
+    Verifies the reset token, updates the user's password, and invalidates the token.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = ConfirmPasswordResetSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        raw_token = serializer.validated_data['token']
+        new_password = serializer.validated_data['new_password']
+
+        user = User.objects.filter(email__iexact=email).first()
+        if not user or not user.is_active:
+            return Response({
+                'detail': 'Account not found or is currently disabled.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        token_record = PasswordResetToken.objects.filter(
+            email=email,
+            is_used=False
+        ).first()
+
+        if not token_record or token_record.is_expired or not token_record.check_token(raw_token):
+            return Response({
+                'detail': 'Invalid or expired password reset link. Please request a new one.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mark token as used
+        token_record.is_used = True
+        token_record.save(update_fields=['is_used'])
+
+        # Update password
+        user.set_password(new_password)
+        user.save(update_fields=['password'])
+
+        return Response({
+            'message': 'Your password has been reset successfully! You can now sign in with your new password.',
+            'success': True
+        }, status=status.HTTP_200_OK)
 
 
 class SignupView(views.APIView):
@@ -156,7 +701,36 @@ class MeView(views.APIView):
 
     def get(self, request):
         request.user.refresh_from_db()
-        return Response(UserSerializer(request.user).data)
+        return Response(UserSerializer(request.user, context={'request': request}).data)
+
+    def patch(self, request):
+        serializer = UserProfileUpdateSerializer(
+            instance=request.user,
+            data=request.data,
+            partial=True,
+            context={'request': request}
+        )
+        if serializer.is_valid():
+            user = serializer.save()
+            user.refresh_from_db()
+            return Response({
+                'user': UserSerializer(user, context={'request': request}).data,
+                'message': 'Profile updated successfully.'
+            }, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ChangePasswordView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                'message': 'Password changed successfully.'
+            }, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class OrganizerSettingsView(views.APIView):

@@ -29,7 +29,7 @@ class Event(models.Model):
     title = models.CharField(max_length=255, unique=True)
     category = models.CharField(max_length=100, choices=CATEGORY_CHOICES, default='Music & Concerts')
     description = models.TextField(blank=True)
-    banner_image = models.ImageField(upload_to='events/banners/', blank=True, null=True)
+    banner_image = models.ImageField(upload_to='events/banners/', max_length=500, blank=True, null=True)
     date = models.DateField()
     start_time = models.TimeField()
     end_time = models.TimeField(null=True, blank=True)

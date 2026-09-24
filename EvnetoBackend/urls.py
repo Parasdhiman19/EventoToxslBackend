@@ -27,8 +27,12 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from events.views import ImageUploadView
 
 urlpatterns = [
+    # Universal Upload Endpoint
+    path('api/upload/image/', ImageUploadView.as_view(), name='root_image_upload'),
+
     # -------------------------------------------------------------------------
     # 1. Django Admin Console
     # -------------------------------------------------------------------------

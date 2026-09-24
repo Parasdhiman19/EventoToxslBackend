@@ -20,11 +20,19 @@ POST   /settlement-accounts/   -> Add a new settlement payout account (manager)
 
 from django.urls import path
 from .views import (
+    RequestSignupOTPView,
+    VerifySignupOTPView,
+    RequestPasswordResetOTPView,
+    VerifyPasswordResetView,
+    RequestPasswordResetLinkView,
+    ValidateResetTokenView,
+    ConfirmPasswordResetView,
     SignupView,
     LoginView,
     CustomTokenRefreshView,
     LogoutView,
     MeView,
+    ChangePasswordView,
     BecomeOrganizerView,
     OrganizerSettingsView,
     SettlementAccountListView,
@@ -37,7 +45,28 @@ urlpatterns = [
     # -------------------------------------------------------------------------
     # Authentication & Session Management (Public)
     # -------------------------------------------------------------------------
-    # POST: Registers a new user with email/password/name, sets refresh cookie & returns access token
+    # POST: Validates signup info, generates secure 6-digit OTP & dispatches email via Brevo
+    path('send-otp/', RequestSignupOTPView.as_view(), name='auth_send_otp'),
+
+    # POST: Verifies OTP, checks attempts/expiry, creates user account & returns JWT tokens
+    path('verify-otp/', VerifySignupOTPView.as_view(), name='auth_verify_otp'),
+
+    # POST: Validates registered email & sends password reset / login OTP via Brevo
+    path('password-reset/send-otp/', RequestPasswordResetOTPView.as_view(), name='password_reset_send_otp'),
+
+    # POST: Verifies OTP, sets refresh cookie & returns access token
+    path('password-reset/verify/', VerifyPasswordResetView.as_view(), name='password_reset_verify'),
+
+    # POST: Validates registered email & sends secure 32-byte reset link via Brevo
+    path('password-reset/send-link/', RequestPasswordResetLinkView.as_view(), name='password_reset_send_link'),
+
+    # POST: Pre-validates reset link token on page load
+    path('password-reset/validate-token/', ValidateResetTokenView.as_view(), name='password_reset_validate_token'),
+
+    # POST: Confirms reset token, updates user password & invalidates token
+    path('password-reset/confirm/', ConfirmPasswordResetView.as_view(), name='password_reset_confirm'),
+
+    # POST: Direct signup endpoint (legacy / fallback)
     path('signup/', SignupView.as_view(), name='auth_signup'),
 
     # POST: Authenticates credentials, sets HttpOnly refresh cookie & returns access token + user info
@@ -53,7 +82,11 @@ urlpatterns = [
     # User Profile & Organizer Onboarding (Authenticated)
     # -------------------------------------------------------------------------
     # GET: Returns current logged-in user profile, role, avatar, and organizer status
+    # PATCH: Updates user profile details, bio, phone, city, notification preferences
     path('me/', MeView.as_view(), name='auth_me'),
+
+    # POST: Updates authenticated user account password with old password verification
+    path('change-password/', ChangePasswordView.as_view(), name='auth_change_password'),
 
     # POST: Upgrades a standard user to an organizer by creating their OrganizerProfile
     path('become-organizer/', BecomeOrganizerView.as_view(), name='become_organizer'),

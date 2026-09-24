@@ -65,9 +65,13 @@ from .views import (
     EventCommentListCreateView,
     EventCommentDetailView,
     CommentLikeToggleView,
+    ImageUploadView,
 )
 
 urlpatterns = [
+    # Universal Image Upload Endpoint (Cloudinary CDN)
+    path('upload/image/', ImageUploadView.as_view(), name='event_image_upload'),
+
     # -------------------------------------------------------------------------
     # 1. Public Event Discovery & Details (Public)
     # -------------------------------------------------------------------------

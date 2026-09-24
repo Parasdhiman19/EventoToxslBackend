@@ -2,11 +2,17 @@ from django.utils import timezone
 from django.db import transaction
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Q
 
 from accounts.permissions import IsManagerUser
 from .models import Event, SavedEvent, EventLike, EventComment, CommentLike
+from .utils.media_utils import upload_image_to_cloudinary
 from .serializers import (
+    PublicEventListSerializer,
+    PublicEventDetailSerializer,
+    ManagerEventListSerializer,
+    ManagerEventDetailSerializer,
     EventListSerializer,
     EventDetailSerializer,
     EventCreateUpdateSerializer,
@@ -81,7 +87,7 @@ class PublicEventListView(views.APIView):
             paginator = Paginator(queryset, page_size)
             try:
                 page_obj = paginator.page(page_num)
-                serialized_events = EventListSerializer(page_obj.object_list, many=True, context={'request': request}).data
+                serialized_events = PublicEventListSerializer(page_obj.object_list, many=True, context={'request': request}).data
             except EmptyPage:
                 serialized_events = []
 
@@ -94,7 +100,7 @@ class PublicEventListView(views.APIView):
                 'results': serialized_events,
             })
 
-        serializer = EventListSerializer(queryset, many=True, context={'request': request})
+        serializer = PublicEventListSerializer(queryset, many=True, context={'request': request})
         return Response(serializer.data)
 
 
@@ -109,7 +115,7 @@ class FeaturedHeroEventView(views.APIView):
             hero = active_events.first()
         if not hero:
             return Response(None)
-        return Response(EventDetailSerializer(hero, context={'request': request}).data)
+        return Response(PublicEventDetailSerializer(hero, context={'request': request}).data)
 
 
 class EventDetailView(views.APIView):
@@ -118,13 +124,14 @@ class EventDetailView(views.APIView):
     def get(self, request, pk):
         try:
             event = Event.objects.get(pk=pk)
-            return Response(EventDetailSerializer(event, context={'request': request}).data)
+            return Response(PublicEventDetailSerializer(event, context={'request': request}).data)
         except Event.DoesNotExist:
             return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class ManagerEventListCreateView(views.APIView):
     permission_classes = [IsManagerUser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
         status_tab = request.query_params.get('status', 'all')
@@ -173,20 +180,23 @@ class ManagerEventListCreateView(views.APIView):
                 )
             )
 
-        serializer = EventListSerializer(queryset, many=True, context={'request': request})
+        serializer = ManagerEventListSerializer(queryset, many=True, context={'request': request})
         return Response(serializer.data)
 
     def post(self, request):
         serializer = EventCreateUpdateSerializer(data=request.data)
-        print(request.data)
+
+
+        
         if serializer.is_valid():
             event = serializer.save(organizer=request.user)
-            return Response(EventDetailSerializer(event, context={'request': request}).data, status=status.HTTP_201_CREATED)
+            return Response(ManagerEventDetailSerializer(event, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ManagerEventDetailView(views.APIView):
     permission_classes = [IsManagerUser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self, pk, user):
         from .models import EventStaff
@@ -198,7 +208,7 @@ class ManagerEventDetailView(views.APIView):
         event = self.get_object(pk, request.user)
         if not event:
             return Response({'detail': 'Event not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(EventDetailSerializer(event, context={'request': request}).data)
+        return Response(ManagerEventDetailSerializer(event, context={'request': request}).data)
 
     def patch(self, request, pk):
         event = Event.objects.filter(pk=pk, organizer=request.user).first()
@@ -207,7 +217,7 @@ class ManagerEventDetailView(views.APIView):
         serializer = EventCreateUpdateSerializer(event, data=request.data, partial=True)
         if serializer.is_valid():
             updated = serializer.save()
-            return Response(EventDetailSerializer(updated, context={'request': request}).data)
+            return Response(ManagerEventDetailSerializer(updated, context={'request': request}).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
@@ -244,7 +254,7 @@ class UserSavedEventsView(views.APIView):
 
     def get(self, request):
         saved_events = Event.objects.filter(saved_by__user=request.user)
-        serializer = EventListSerializer(saved_events, many=True, context={'request': request})
+        serializer = PublicEventListSerializer(saved_events, many=True, context={'request': request})
         return Response(serializer.data)
 
 
@@ -808,5 +818,57 @@ class CommentLikeToggleView(views.APIView):
             'isLiked': is_liked,
             'likeCount': comment.likes.count(),
         })
+
+
+class ImageUploadView(views.APIView):
+    """
+    POST /api/events/upload/image/
+    Universal image upload endpoint for event banners, studio logos, and profile artwork.
+    Uploads directly to Cloudinary and returns the permanent HTTPS CDN URL.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        uploaded_file = (
+            request.FILES.get('image') or
+            request.FILES.get('file') or
+            request.FILES.get('banner') or
+            request.FILES.get('logo') or
+            request.data.get('image') or
+            request.data.get('file') or
+            request.data.get('banner') or
+            request.data.get('logo')
+        )
+
+        if not uploaded_file:
+            return Response(
+                {'detail': 'No image file provided in request.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Folder can be 'banners', 'logos', 'avatars', etc.
+        raw_folder = request.data.get('folder', 'banners')
+        clean_folder = 'evento/' + str(raw_folder).strip().strip('/')
+
+        try:
+            cdn_url = upload_image_to_cloudinary(uploaded_file, folder=clean_folder)
+            if not cdn_url:
+                return Response(
+                    {'detail': 'Failed to process image file. Please ensure it is a valid image.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            return Response({
+                'url': cdn_url,
+                'secure_url': cdn_url,
+                'message': 'Image uploaded successfully.'
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {'detail': f'Upload failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 

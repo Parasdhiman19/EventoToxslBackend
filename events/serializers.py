@@ -1,104 +1,39 @@
-import base64
-import uuid
+import json
 from decimal import Decimal
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
 from django.db import transaction
 from rest_framework import serializers
+
 from .models import Event, TicketTier, SavedEvent, EventLike, EventComment, CommentLike
+from .utils.media_utils import upload_image_to_cloudinary, resolve_image_url, format_relative_time
+from .services.seating_service import sync_seating_layout_to_db
+from .services.staff_service import sync_event_staff_ids, sync_event_staff_ids as _sync_event_staff_ids
 
 
-def save_base64_image(data_uri):
+
+class PublicTicketTierSerializer(serializers.ModelSerializer):
     """
-    Decodes a base64 DataURL (or direct UploadedFile) and wraps it as a ContentFile.
-    When assigned to an ImageField(upload_to='events/banners/'), Django automatically
-    handles saving it into MEDIA_ROOT/events/banners/<name> via the model field's upload_to.
+    Public-safe ticket tier serializer for attendee discovery and booking.
+    Excludes soldCount, gross earnings, and internal inventory limits.
     """
-    if not data_uri:
-        return None
+    tierName = serializers.CharField(source='name', read_only=True)
+    isSoldOut = serializers.SerializerMethodField()
+    is_sold_out = serializers.SerializerMethodField()
 
-    # If it's already an UploadedFile / FieldFile instance
-    if hasattr(data_uri, 'read') and hasattr(data_uri, 'name'):
-        return data_uri
+    class Meta:
+        model = TicketTier
+        fields = ('id', 'name', 'tierName', 'price', 'description', 'isSoldOut', 'is_sold_out')
 
-    if not isinstance(data_uri, str):
-        return None
+    def get_isSoldOut(self, obj):
+        return obj.capacity > 0 and obj.sold_count >= obj.capacity
 
-    if data_uri.startswith('data:image/'):
-        try:
-            format_part, img_str = data_uri.split(';base64,')
-            ext = format_part.split('/')[-1].lower()
-            if ext == 'jpeg':
-                ext = 'jpg'
-            elif ext not in ['jpg', 'png', 'webp', 'gif']:
-                ext = 'jpg'
-
-            decoded_file = base64.b64decode(img_str)
-            filename = f"{uuid.uuid4().hex[:12]}.{ext}"
-            return ContentFile(decoded_file, name=filename)
-        except Exception:
-            return None
-
-    return None
+    def get_is_sold_out(self, obj):
+        return obj.capacity > 0 and obj.sold_count >= obj.capacity
 
 
-def resolve_image_url(image_field, request=None):
+class ManagerTicketTierSerializer(serializers.ModelSerializer):
     """
-    Resolves a model ImageField (or relative path/URL) to an absolute URL.
+    Manager-only ticket tier serializer with full financial metrics & sales count.
     """
-    if not image_field:
-        return ''
-
-    # If it's a Django FieldFile instance
-    if hasattr(image_field, 'url'):
-        try:
-            url = image_field.url
-            if not url:
-                return ''
-            if request:
-                return request.build_absolute_uri(url)
-            return f"http://127.0.0.1:8000{url}"
-        except (ValueError, Exception):
-            return ''
-
-    image_str = str(image_field).strip()
-    if not image_str:
-        return ''
-    if image_str.startswith(('http://', 'https://', 'data:')):
-        return image_str
-    if not image_str.startswith('/media/') and not image_str.startswith('/'):
-        image_str = f"/media/{image_str}"
-    if image_str.startswith('/media/'):
-        if request:
-            return request.build_absolute_uri(image_str)
-        return f"http://127.0.0.1:8000{image_str}"
-    return image_str
-
-
-def format_relative_time(dt):
-    if not dt:
-        return ''
-    from django.utils import timezone
-    now = timezone.now()
-    diff = now - dt
-    seconds = int(diff.total_seconds())
-    if seconds < 0:
-        return 'Just now'
-    if seconds < 60:
-        return 'Just now'
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h ago"
-    days = hours // 24
-    if days < 7:
-        return f"{days}d ago"
-    return dt.strftime('%b %d, %Y')
-
-
-class TicketTierSerializer(serializers.ModelSerializer):
     tierName = serializers.CharField(source='name', read_only=True)
     soldCount = serializers.IntegerField(source='sold_count', read_only=True)
     gross = serializers.SerializerMethodField()
@@ -109,6 +44,9 @@ class TicketTierSerializer(serializers.ModelSerializer):
 
     def get_gross(self, obj):
         return f"${(obj.price * obj.sold_count):,.2f}"
+
+
+TicketTierSerializer = ManagerTicketTierSerializer
 
 
 class SeatSerializer(serializers.ModelSerializer):
@@ -153,126 +91,244 @@ class SeatSerializer(serializers.ModelSerializer):
         return f"{obj.row}-{obj.seat_number}"
 
 
-def sync_seating_layout_to_db(event, seating_layout):
+
+
+
+class PublicEventListSerializer(serializers.ModelSerializer):
     """
-    Parses seating_layout JSON and synchronizes TicketTier and Seat models.
+    Public discovery event serializer.
+    Excludes sensitive financial metrics (grossRevenue, ticketsSold, totalCapacity, staff permissions).
     """
-    if not seating_layout or not isinstance(seating_layout, dict):
-        return
+    organizer = serializers.SerializerMethodField()
+    venue = serializers.CharField(source='venue_name', read_only=True)
+    venueName = serializers.CharField(source='venue_name', read_only=True)
+    time = serializers.SerializerMethodField()
+    date = serializers.SerializerMethodField()
+    dateFormatted = serializers.SerializerMethodField()
+    startTime = serializers.SerializerMethodField()
+    endTime = serializers.SerializerMethodField()
+    startingPrice = serializers.SerializerMethodField()
+    priceRange = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+    banner = serializers.SerializerMethodField()
+    banner_image = serializers.SerializerMethodField()
+    isBookmarked = serializers.SerializerMethodField()
+    likesCount = serializers.SerializerMethodField()
+    isLiked = serializers.SerializerMethodField()
+    commentsCount = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    isEnded = serializers.SerializerMethodField()
+    is_ended = serializers.SerializerMethodField()
+    hasAssignedSeating = serializers.BooleanField(source='has_assigned_seating', read_only=True)
 
-    from .models import Seat
+    class Meta:
+        model = Event
+        fields = (
+            'id', 'title', 'organizer', 'category', 'date', 'dateFormatted',
+            'time', 'start_time', 'startTime', 'end_time', 'endTime',
+            'city', 'venue', 'venueName', 'venue_name', 'address', 'is_online',
+            'startingPrice', 'priceRange', 'image', 'banner', 'banner_image',
+            'status', 'isEnded', 'is_ended', 'is_featured', 'isBookmarked',
+            'likesCount', 'isLiked', 'commentsCount',
+            'has_assigned_seating', 'hasAssignedSeating'
+        )
 
-    # 1. Update event layout field
-    event.seating_layout = seating_layout
-    event.has_assigned_seating = True
-    event.save(update_fields=['seating_layout', 'has_assigned_seating'])
+    def get_status(self, obj):
+        return obj.computed_status
 
-    tiers_config = seating_layout.get('tiers', [])
-    grid = seating_layout.get('grid', [])
+    def get_isEnded(self, obj):
+        return obj.is_ended
 
-    # Calculate capacity per tier from the grid
-    tier_counts = {}
-    for seat_data in grid:
-        if not seat_data or seat_data.get('status') == 'empty' or seat_data.get('isAisle') or seat_data.get('is_aisle'):
-            continue
-        tier_name = (seat_data.get('tierName') or seat_data.get('tier') or 'General Admission').strip()
-        tier_counts[tier_name] = tier_counts.get(tier_name, 0) + 1
+    def get_is_ended(self, obj):
+        return obj.is_ended
 
-    # Map or create TicketTiers
-    existing_tiers = {t.name.lower(): t for t in event.tiers.all()}
-    tier_model_map = {}
+    def get_image(self, obj):
+        return resolve_image_url(obj.banner_image, self.context.get('request'))
 
-    for t_conf in tiers_config:
-        t_name = (t_conf.get('name') or 'General Admission').strip()
-        raw_price = t_conf.get('price', 0)
+    def get_banner(self, obj):
+        return resolve_image_url(obj.banner_image, self.context.get('request'))
+
+    def get_banner_image(self, obj):
+        return resolve_image_url(obj.banner_image, self.context.get('request'))
+
+    def get_organizer(self, obj):
         try:
-            price = Decimal(str(raw_price).replace('$', '').strip()) if raw_price not in [None, ''] else Decimal('0.00')
+            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
+                if obj.organizer.organizer_profile.organization_name:
+                    return obj.organizer.organizer_profile.organization_name
         except Exception:
-            price = Decimal('0.00')
-        desc = t_conf.get('description', '') or ''
-        cap = max(1, tier_counts.get(t_name, t_conf.get('capacity', 100)))
+            pass
+        return getattr(obj.organizer, 'full_name', '') or "Nexus Productions"
 
-        if t_name.lower() in existing_tiers:
-            tier_obj = existing_tiers[t_name.lower()]
-            tier_obj.price = price
-            tier_obj.capacity = max(cap, tier_obj.sold_count)
-            tier_obj.description = desc
-            tier_obj.save()
-        else:
-            tier_obj = TicketTier.objects.create(
-                event=event,
-                name=t_name,
-                price=price,
-                capacity=cap,
-                description=desc
-            )
-        tier_model_map[t_name.lower()] = tier_obj
+    def get_time(self, obj):
+        return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
 
-    # Fallback: if no tiers_config defined but grid has seats
-    for t_name, count in tier_counts.items():
-        if t_name.lower() not in tier_model_map:
-            if t_name.lower() in existing_tiers:
-                tier_obj = existing_tiers[t_name.lower()]
-                tier_obj.capacity = max(count, tier_obj.sold_count)
-                tier_obj.save()
-            else:
-                tier_obj = TicketTier.objects.create(
-                    event=event,
-                    name=t_name,
-                    price=Decimal('35.00'),
-                    capacity=count,
-                    description='Standard Seating'
-                )
-            tier_model_map[t_name.lower()] = tier_obj
+    def get_date(self, obj):
+        return str(obj.date) if obj.date else ''
 
-    # Synchronize Seats
-    existing_seats = {
-        (s.section_name, s.row, str(s.seat_number)): s
-        for s in event.seats.all()
-    }
-    active_seat_keys = set()
+    def get_dateFormatted(self, obj):
+        return obj.date.strftime('%b %d, %Y') if obj.date else ''
 
-    for seat_data in grid:
-        if not seat_data or seat_data.get('status') == 'empty' or seat_data.get('isAisle') or seat_data.get('is_aisle'):
-            continue
+    def get_startTime(self, obj):
+        return obj.start_time.strftime('%H:%M') if obj.start_time else ''
 
-        sec = seat_data.get('sectionName') or seat_data.get('section_name') or 'Main Hall'
-        row = str(seat_data.get('row', '')).strip()
-        num = str(seat_data.get('seatNumber') or seat_data.get('seat_number') or seat_data.get('col', '')).strip()
-        if not row or not num:
-            continue
+    def get_endTime(self, obj):
+        return obj.end_time.strftime('%H:%M') if obj.end_time else ''
 
-        key = (sec, row, num)
-        active_seat_keys.add(key)
-        t_name = (seat_data.get('tierName') or seat_data.get('tier') or 'General Admission').strip().lower()
-        tier_obj = tier_model_map.get(t_name) or event.tiers.first()
-        is_acc = bool(seat_data.get('isAccessible') or seat_data.get('is_accessible'))
-        raw_status = seat_data.get('status', 'available')
-        seat_status = raw_status if raw_status in ['available', 'reserved', 'booked', 'blocked'] else 'available'
+    def get_startingPrice(self, obj):
+        tiers = obj.tiers.all()
+        if not tiers.exists():
+            return 'Free'
+        min_price = min(t.price for t in tiers)
+        return f"${min_price:,.2f}" if min_price > 0 else 'Free Entry'
 
-        if key in existing_seats:
-            seat_obj = existing_seats[key]
-            # Don't overwrite if seat is already booked/sold
-            if seat_obj.status != 'booked':
-                seat_obj.tier = tier_obj
-                seat_obj.status = seat_status
-                seat_obj.is_accessible = is_acc
-                seat_obj.save()
-        else:
-            Seat.objects.create(
-                event=event,
-                tier=tier_obj,
-                section_name=sec,
-                row=row,
-                seat_number=num,
-                status=seat_status,
-                is_accessible=is_acc
-            )
+    def get_priceRange(self, obj):
+        tiers = obj.tiers.all()
+        if not tiers.exists():
+            return 'Free'
+        prices = [t.price for t in tiers]
+        min_p, max_p = min(prices), max(prices)
+        if min_p == max_p:
+            return f"${min_p:,.2f}" if min_p > 0 else 'Free'
+        return f"${min_p:,.0f} – ${max_p:,.0f}"
 
-    # Delete obsolete seats that are not booked
-    for key, seat_obj in existing_seats.items():
-        if key not in active_seat_keys and seat_obj.status != 'booked':
-            seat_obj.delete()
+    def get_isBookmarked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return SavedEvent.objects.filter(user=request.user, event=obj).exists()
+        return False
+
+    def get_likesCount(self, obj):
+        return obj.likes.count()
+
+    def get_isLiked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.likes.filter(user=request.user).exists()
+        return False
+
+    def get_commentsCount(self, obj):
+        return obj.comments.filter(is_deleted=False).count()
+
+
+class PublicEventDetailSerializer(serializers.ModelSerializer):
+    """
+    Public-safe event detail serializer for attendee stage viewing and booking.
+    Uses PublicTicketTierSerializer to hide gross sales and sold counts.
+    """
+    organizer = serializers.SerializerMethodField()
+    venue = serializers.CharField(source='venue_name', read_only=True)
+    venueName = serializers.CharField(source='venue_name', read_only=True)
+    time = serializers.SerializerMethodField()
+    dateFormatted = serializers.SerializerMethodField()
+    startTime = serializers.SerializerMethodField()
+    endTime = serializers.SerializerMethodField()
+    startingPrice = serializers.SerializerMethodField()
+    priceRange = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+    banner = serializers.SerializerMethodField()
+    banner_image = serializers.SerializerMethodField()
+    tiers = PublicTicketTierSerializer(many=True, read_only=True)
+    isBookmarked = serializers.SerializerMethodField()
+    likesCount = serializers.SerializerMethodField()
+    isLiked = serializers.SerializerMethodField()
+    commentsCount = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    isEnded = serializers.SerializerMethodField()
+    is_ended = serializers.SerializerMethodField()
+    hasAssignedSeating = serializers.BooleanField(source='has_assigned_seating', read_only=True)
+    seatingLayout = serializers.JSONField(source='seating_layout', read_only=True)
+    allowTicketTransfers = serializers.BooleanField(source='allow_ticket_transfers', read_only=True)
+    requireAttendeePhone = serializers.BooleanField(source='require_attendee_phone', read_only=True)
+    autoRefundCancelledEvents = serializers.BooleanField(source='auto_refund_cancelled_events', read_only=True)
+
+    class Meta:
+        model = Event
+        fields = (
+            'id', 'title', 'organizer', 'category', 'description', 'date', 'dateFormatted',
+            'start_time', 'end_time', 'startTime', 'endTime', 'time',
+            'venue_name', 'venueName', 'venue', 'city', 'address',
+            'is_online', 'status', 'isEnded', 'is_ended', 'is_featured', 'image', 'banner', 'banner_image',
+            'startingPrice', 'priceRange', 'tiers', 'isBookmarked', 'likesCount', 'isLiked', 'commentsCount',
+            'has_assigned_seating', 'hasAssignedSeating', 'seating_layout', 'seatingLayout',
+            'allow_ticket_transfers', 'allowTicketTransfers',
+            'require_attendee_phone', 'requireAttendeePhone',
+            'auto_refund_cancelled_events', 'autoRefundCancelledEvents',
+        )
+
+    def get_status(self, obj):
+        return obj.computed_status
+
+    def get_isEnded(self, obj):
+        return obj.is_ended
+
+    def get_is_ended(self, obj):
+        return obj.is_ended
+
+    def get_image(self, obj):
+        return resolve_image_url(obj.banner_image, self.context.get('request'))
+
+    def get_banner(self, obj):
+        return resolve_image_url(obj.banner_image, self.context.get('request'))
+
+    def get_banner_image(self, obj):
+        return resolve_image_url(obj.banner_image, self.context.get('request'))
+
+    def get_organizer(self, obj):
+        try:
+            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
+                if obj.organizer.organizer_profile.organization_name:
+                    return obj.organizer.organizer_profile.organization_name
+        except Exception:
+            pass
+        return getattr(obj.organizer, 'full_name', '') or "Nexus Productions"
+
+    def get_time(self, obj):
+        return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
+
+    def get_dateFormatted(self, obj):
+        return obj.date.strftime('%b %d, %Y') if obj.date else ''
+
+    def get_startTime(self, obj):
+        return obj.start_time.strftime('%H:%M') if obj.start_time else ''
+
+    def get_endTime(self, obj):
+        return obj.end_time.strftime('%H:%M') if obj.end_time else ''
+
+    def get_startingPrice(self, obj):
+        tiers = obj.tiers.all()
+        if not tiers.exists():
+            return '$0.00'
+        min_price = min(t.price for t in tiers)
+        return f"${min_price:,.2f}"
+
+    def get_priceRange(self, obj):
+        tiers = obj.tiers.all()
+        if not tiers.exists():
+            return 'Free'
+        prices = [t.price for t in tiers]
+        min_p, max_p = min(prices), max(prices)
+        if min_p == max_p:
+            return f"${min_p:,.2f}" if min_p > 0 else 'Free'
+        return f"${min_p:,.0f} – ${max_p:,.0f}"
+
+    def get_isBookmarked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return SavedEvent.objects.filter(user=request.user, event=obj).exists()
+        return False
+
+    def get_likesCount(self, obj):
+        return obj.likes.count()
+
+    def get_isLiked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.likes.filter(user=request.user).exists()
+        return False
+
+    def get_commentsCount(self, obj):
+        return obj.comments.filter(is_deleted=False).count()
 
 
 class EventListSerializer(serializers.ModelSerializer):
@@ -602,6 +658,10 @@ class EventDetailSerializer(serializers.ModelSerializer):
         return None
 
 
+ManagerEventListSerializer = EventListSerializer
+ManagerEventDetailSerializer = EventDetailSerializer
+
+
 def _parse_tier_item(tier_dict):
     name = tier_dict.get('name') or tier_dict.get('tierName') or 'General Admission'
     raw_price = tier_dict.get('price', 0)
@@ -625,7 +685,7 @@ def _parse_tier_item(tier_dict):
 
 class EventCreateUpdateSerializer(serializers.ModelSerializer):
     tiers = serializers.ListField(child=serializers.DictField(), write_only=True, required=False)
-    banner_image = serializers.ImageField(required=False, allow_null=True)
+    banner_image = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     seating_layout = serializers.JSONField(required=False)
     seatingLayout = serializers.JSONField(required=False)
     has_assigned_seating = serializers.BooleanField(required=False)
@@ -681,11 +741,30 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         if 'autoRefundCancelledEvents' in data:
             data['auto_refund_cancelled_events'] = data.pop('autoRefundCancelledEvents')
 
+        # Parse stringified JSON fields if submitted via multipart/form-data
+        if 'tiers' in data and isinstance(data['tiers'], str):
+            try:
+                data['tiers'] = json.loads(data['tiers'])
+            except Exception:
+                pass
+
+        if 'seating_layout' in data and isinstance(data['seating_layout'], str):
+            try:
+                data['seating_layout'] = json.loads(data['seating_layout'])
+            except Exception:
+                pass
+
         raw_staff_ids = data.pop('assignedStaffIds', None)
         if raw_staff_ids is None:
             raw_staff_ids = data.pop('assigned_staff_ids', None)
 
         if raw_staff_ids is not None:
+            if isinstance(raw_staff_ids, str):
+                try:
+                    raw_staff_ids = json.loads(raw_staff_ids)
+                except Exception:
+                    pass
+
             clean_staff_ids = []
             if isinstance(raw_staff_ids, (list, tuple, set)):
                 for item in raw_staff_ids:
@@ -710,18 +789,18 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
                 pass
             else:
                 data['banner_image'] = None
-        elif isinstance(banner_val, str) and banner_val.startswith('data:image/'):
-            content_file = save_base64_image(banner_val)
-            if content_file:
-                data['banner_image'] = content_file
-            else:
-                data.pop('banner_image', None)
-        elif isinstance(banner_val, str) and (banner_val.startswith('/media/') or banner_val.startswith('http') or banner_val.startswith('events/')):
-            # When updating without changing image, don't overwrite
-            data.pop('banner_image', None)
         elif hasattr(banner_val, 'read'):
-            # Direct file upload
-            pass
+            # Direct file upload (via FormData or file stream)
+            uploaded_url = upload_image_to_cloudinary(banner_val, folder='evento/banners')
+            data['banner_image'] = uploaded_url
+        elif isinstance(banner_val, str) and banner_val.startswith(('http://', 'https://')):
+            # Direct Cloudinary / external HTTPS URL
+            if self.instance and banner_val == resolve_image_url(self.instance.banner_image):
+                data.pop('banner_image', None)
+            else:
+                data['banner_image'] = banner_val
+        elif isinstance(banner_val, str) and (banner_val.startswith('/media/') or banner_val.startswith('events/')):
+            data.pop('banner_image', None)
 
         if data.get('venue_name') is None:
             data['venue_name'] = ''
@@ -830,62 +909,7 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         return instance
 
 
-def _sync_event_staff_ids(event, staff_user_ids):
-    """
-    Synchronizes EventStaff assignments for an event based on selected staff user IDs.
-    Inherits default roles/permissions from the organizer's StudioStaffMember directory if available.
-    """
-    from .models import EventStaff
-    from accounts.models import StudioStaffMember, User
 
-    if staff_user_ids is None:
-        return
-
-    clean_ids = set()
-    for uid in staff_user_ids:
-        try:
-            val = int(uid)
-            if val != event.organizer_id:
-                clean_ids.add(val)
-        except (ValueError, TypeError):
-            pass
-
-    studio_staff_map = {
-        sm.user_id: sm
-        for sm in StudioStaffMember.objects.filter(organizer=event.organizer, user_id__in=clean_ids)
-    }
-
-    existing_staff_records = {s.user_id: s for s in EventStaff.objects.filter(event=event)}
-
-    # Remove unselected staff
-    for uid, staff_obj in existing_staff_records.items():
-        if uid not in clean_ids:
-            staff_obj.delete()
-
-    # Create or retain selected staff
-    for uid in clean_ids:
-        studio_member = studio_staff_map.get(uid)
-        role_title = studio_member.role_title if studio_member else 'Stage Coordinator'
-        can_view = studio_member.default_can_view_attendees if studio_member else True
-        can_check = studio_member.default_can_check_in if studio_member else True
-        can_edit = studio_member.default_can_edit_attendees if studio_member else False
-
-        if uid in existing_staff_records:
-            staff_obj = existing_staff_records[uid]
-            if not staff_obj.role_title and role_title:
-                staff_obj.role_title = role_title
-                staff_obj.save(update_fields=['role_title'])
-        else:
-            u_obj = User.objects.filter(pk=uid, is_active=True).first()
-            if u_obj:
-                EventStaff.objects.create(
-                    event=event,
-                    user=u_obj,
-                    role_title=role_title,
-                    can_view_attendees=can_view,
-                    can_check_in=can_check,
-                    can_edit_attendees=can_edit
-                )
 
 
 class StaffUserSearchSerializer(serializers.Serializer):
@@ -1224,11 +1248,32 @@ class StaffAssignedEventSerializer(serializers.ModelSerializer):
 class CommentUserSerializer(serializers.ModelSerializer):
     fullName = serializers.CharField(source='full_name', read_only=True)
     isOrganizer = serializers.BooleanField(source='is_organizer', read_only=True)
+    avatarUrl = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         from django.contrib.auth import get_user_model
         model = get_user_model()
-        fields = ('id', 'email', 'fullName', 'full_name', 'role', 'isOrganizer')
+        fields = ('id', 'email', 'username', 'fullName', 'full_name', 'avatarUrl', 'avatar_url', 'bio', 'role', 'isOrganizer')
+
+    def _resolve_avatar(self, obj):
+        url = getattr(obj, 'avatar_url', '') or ''
+        if not url:
+            return ''
+        if url.startswith(('http://', 'https://')):
+            return url
+        request = self.context.get('request')
+        if url.startswith('/media/'):
+            if request:
+                return request.build_absolute_uri(url)
+            return f"http://127.0.0.1:8000{url}"
+        return url
+
+    def get_avatarUrl(self, obj):
+        return self._resolve_avatar(obj)
+
+    def get_avatar_url(self, obj):
+        return self._resolve_avatar(obj)
 
 
 class CommentSerializer(serializers.ModelSerializer):

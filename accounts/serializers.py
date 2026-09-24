@@ -1,23 +1,199 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
-from .models import User, OrganizerProfile, SettlementAccount, StudioStaffMember
+from .models import User, OrganizerProfile, SettlementAccount, StudioStaffMember, EmailVerificationOTP, PasswordResetToken
 from .constants import USER, MANAGER
 
 
 class UserSerializer(serializers.ModelSerializer):
     fullName = serializers.CharField(source='full_name', read_only=True)
+    avatarUrl = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
+    emailNotifications = serializers.BooleanField(source='email_notifications', read_only=True)
     isOrganizer = serializers.SerializerMethodField()
     is_organizer = serializers.SerializerMethodField()
+    ticketsCount = serializers.SerializerMethodField()
+    ordersCount = serializers.SerializerMethodField()
+    savedCount = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'fullName', 'full_name', 'role', 'isOrganizer', 'is_organizer', 'created_at')
+        fields = (
+            'id', 'email', 'username', 'fullName', 'full_name',
+            'avatar_url', 'avatarUrl', 'bio', 'phone', 'city',
+            'email_notifications', 'emailNotifications',
+            'role', 'isOrganizer', 'is_organizer',
+            'ticketsCount', 'ordersCount', 'savedCount',
+            'created_at'
+        )
+
+    def _resolve_avatar(self, obj):
+        url = getattr(obj, 'avatar_url', '') or ''
+        if not url:
+            return ''
+        if url.startswith(('http://', 'https://')):
+            return url
+        request = self.context.get('request')
+        if url.startswith('/media/'):
+            if request:
+                return request.build_absolute_uri(url)
+            return f"http://127.0.0.1:8000{url}"
+        return url
+
+    def get_avatarUrl(self, obj):
+        return self._resolve_avatar(obj)
+
+    def get_avatar_url(self, obj):
+        return self._resolve_avatar(obj)
 
     def get_isOrganizer(self, obj):
         return getattr(obj, 'is_organizer', False)
 
     def get_is_organizer(self, obj):
         return getattr(obj, 'is_organizer', False)
+
+    def get_ticketsCount(self, obj):
+        try:
+            from tickets.models import AttendeeTicket
+            return AttendeeTicket.objects.filter(order__user=obj).count()
+        except Exception:
+            return 0
+
+    def get_ordersCount(self, obj):
+        try:
+            from tickets.models import Order
+            return Order.objects.filter(user=obj).count()
+        except Exception:
+            return 0
+
+    def get_savedCount(self, obj):
+        try:
+            from events.models import SavedEvent
+            return SavedEvent.objects.filter(user=obj).count()
+        except Exception:
+            return 0
+
+
+class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    fullName = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    full_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    bio = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    phone = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    city = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    avatar = serializers.CharField(required=False, allow_blank=True)
+    avatarUrl = serializers.CharField(required=False, allow_blank=True)
+    avatar_url = serializers.CharField(required=False, allow_blank=True)
+    emailNotifications = serializers.BooleanField(required=False)
+    email_notifications = serializers.BooleanField(required=False)
+
+    class Meta:
+        model = User
+        fields = (
+            'username', 'fullName', 'full_name', 'bio', 'phone', 'city',
+            'avatar', 'avatarUrl', 'avatar_url',
+            'emailNotifications', 'email_notifications'
+        )
+
+    def validate_username(self, value):
+        if not value:
+            return value
+        cleaned = value.strip().lower()
+        # Clean leading @ if user entered @username
+        if cleaned.startswith('@'):
+            cleaned = cleaned[1:]
+        if len(cleaned) < 3:
+            raise serializers.ValidationError("Username must be at least 3 characters long.")
+        if len(cleaned) > 30:
+            raise serializers.ValidationError("Username cannot exceed 30 characters.")
+        if not all(c.isalnum() or c == '_' for c in cleaned):
+            raise serializers.ValidationError("Username can only contain alphanumeric characters and underscores.")
+        
+        user = self.instance
+        if User.objects.filter(username__iexact=cleaned).exclude(pk=user.pk if user else None).exists():
+            raise serializers.ValidationError("This username is already taken. Please choose another one.")
+        return cleaned
+
+    def validate_bio(self, value):
+        if len(value) > 300:
+            raise serializers.ValidationError("Bio cannot exceed 300 characters.")
+        return value
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        mapping = {
+            'fullName': 'full_name',
+            'avatarUrl': 'avatar_url',
+            'avatar': 'avatar_url',
+            'emailNotifications': 'email_notifications',
+        }
+        for camel, snake in mapping.items():
+            if camel in data:
+                data[snake] = data.pop(camel)
+        return super().to_internal_value(data)
+
+    def update(self, instance, validated_data):
+        if 'full_name' in validated_data:
+            instance.full_name = validated_data['full_name'].strip()
+        if 'username' in validated_data and validated_data['username']:
+            instance.username = validated_data['username']
+        if 'bio' in validated_data:
+            instance.bio = validated_data['bio'].strip()
+        if 'phone' in validated_data:
+            instance.phone = validated_data['phone'].strip()
+        if 'city' in validated_data:
+            instance.city = validated_data['city'].strip()
+        if 'email_notifications' in validated_data:
+            instance.email_notifications = validated_data['email_notifications']
+
+        avatar_val = validated_data.get('avatar_url')
+        if avatar_val is not None:
+            if avatar_val == '':
+                instance.avatar_url = ''
+            elif hasattr(avatar_val, 'read') or (isinstance(avatar_val, str) and (avatar_val.startswith('data:image/') or avatar_val.startswith(('http://', 'https://')))):
+                from events.utils.media_utils import upload_image_to_cloudinary
+                if hasattr(avatar_val, 'read') or avatar_val.startswith('data:image/'):
+                    uploaded_url = upload_image_to_cloudinary(avatar_val, folder='evento/users/avatars')
+                    instance.avatar_url = uploaded_url
+                else:
+                    instance.avatar_url = avatar_val
+
+        instance.save()
+        return instance
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    oldPassword = serializers.CharField(write_only=True, required=False)
+    old_password = serializers.CharField(write_only=True, required=False)
+    newPassword = serializers.CharField(write_only=True, min_length=8, required=False)
+    new_password = serializers.CharField(write_only=True, min_length=8, required=False)
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        old_pw = attrs.get('old_password') or attrs.get('oldPassword')
+        new_pw = attrs.get('new_password') or attrs.get('newPassword')
+
+        if not old_pw:
+            raise serializers.ValidationError({"oldPassword": "Current password is required."})
+        if not new_pw:
+            raise serializers.ValidationError({"newPassword": "New password is required."})
+        if len(new_pw) < 8:
+            raise serializers.ValidationError({"newPassword": "New password must be at least 8 characters long."})
+
+        if not user.check_password(old_pw):
+            raise serializers.ValidationError({"oldPassword": "The current password you entered is incorrect."})
+
+        if old_pw == new_pw:
+            raise serializers.ValidationError({"newPassword": "New password cannot be the same as your old password."})
+
+        attrs['new_password'] = new_pw
+        return attrs
+
+    def save(self):
+        user = self.context['request'].user
+        new_password = self.validated_data['new_password']
+        user.set_password(new_password)
+        user.save(update_fields=['password'])
+        return user
 
 
 class BecomeOrganizerSerializer(serializers.Serializer):
@@ -70,6 +246,111 @@ class BecomeOrganizerSerializer(serializers.Serializer):
             user.save(update_fields=['role'])
 
         return profile
+
+
+class RequestSignupOTPSerializer(serializers.Serializer):
+    fullName = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    full_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    role = serializers.CharField(default=USER, required=False)
+
+    def validate_email(self, value):
+        cleaned_email = value.lower().strip()
+        if User.objects.filter(email__iexact=cleaned_email).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return cleaned_email
+
+
+class VerifySignupOTPSerializer(serializers.Serializer):
+    fullName = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    full_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    role = serializers.CharField(default=USER, required=False)
+    otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+    def validate_otp(self, value):
+        cleaned_otp = str(value).strip()
+        if not cleaned_otp.isdigit() or len(cleaned_otp) != 6:
+            raise serializers.ValidationError("OTP must be a 6-digit number.")
+        return cleaned_otp
+
+
+class ResendOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    purpose = serializers.CharField(default=EmailVerificationOTP.PURPOSE_SIGNUP, required=False)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+
+class RequestPasswordResetOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        cleaned_email = value.lower().strip()
+        user = User.objects.filter(email__iexact=cleaned_email).first()
+        if not user:
+            raise serializers.ValidationError("No account found registered with this email address.")
+        if not user.is_active:
+            raise serializers.ValidationError("This account is currently disabled. Please contact support.")
+        return cleaned_email
+
+
+class VerifyPasswordResetSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+    def validate_otp(self, value):
+        cleaned_otp = str(value).strip()
+        if not cleaned_otp.isdigit() or len(cleaned_otp) != 6:
+            raise serializers.ValidationError("OTP must be a 6-digit number.")
+        return cleaned_otp
+
+
+class RequestPasswordResetLinkSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        cleaned_email = value.lower().strip()
+        user = User.objects.filter(email__iexact=cleaned_email).first()
+        if not user:
+            raise serializers.ValidationError("No account found registered with this email address.")
+        if not user.is_active:
+            raise serializers.ValidationError("This account is currently disabled. Please contact support.")
+        return cleaned_email
+
+
+class ValidateResetTokenSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    token = serializers.CharField(min_length=10)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+
+class ConfirmPasswordResetSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    token = serializers.CharField(min_length=10)
+    new_password = serializers.CharField(write_only=True, min_length=8, required=False)
+    newPassword = serializers.CharField(write_only=True, min_length=8, required=False)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+    def validate(self, attrs):
+        password = attrs.get('new_password') or attrs.get('newPassword')
+        if not password:
+            raise serializers.ValidationError({"new_password": "New password is required."})
+        attrs['new_password'] = password
+        return attrs
 
 
 class SignupSerializer(serializers.Serializer):
@@ -130,34 +411,17 @@ class LoginSerializer(serializers.Serializer):
         return attrs
 
 
-import base64
-import uuid
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
+from events.utils.media_utils import upload_image_to_cloudinary
 
 
-def save_organizer_logo(data_uri, folder='organizers/logos'):
+def save_organizer_logo(data_uri_or_file, folder='evento/organizers/logos'):
     """
-    Decodes a base64 DataURL or file and saves it into Django's media storage.
-    Returns relative media URL path (e.g. '/media/organizers/logos/abc.jpg').
+    Uploads organizer studio logo directly to Cloudinary and returns secure CDN URL.
     """
-    if not data_uri or not isinstance(data_uri, str):
+    if not data_uri_or_file:
         return ''
-    if data_uri.startswith('data:image/'):
-        try:
-            format_part, img_str = data_uri.split(';base64,')
-            ext = format_part.split('/')[-1].lower()
-            if ext == 'jpeg':
-                ext = 'jpg'
-            elif ext not in ['jpg', 'png', 'webp', 'gif', 'svg+xml']:
-                ext = 'jpg'
-            decoded_file = base64.b64decode(img_str)
-            filename = f"{folder}/{uuid.uuid4().hex[:12]}.{ext}"
-            saved_path = default_storage.save(filename, ContentFile(decoded_file))
-            return f"/media/{saved_path}"
-        except Exception:
-            return data_uri
-    return data_uri
+    return upload_image_to_cloudinary(data_uri_or_file, folder=folder)
+
 
 
 class SettlementAccountSerializer(serializers.ModelSerializer):
@@ -249,25 +513,26 @@ class SettlementAccountSerializer(serializers.ModelSerializer):
 
 
 class OrganizerProfileSerializer(serializers.ModelSerializer):
-    organizationName = serializers.CharField(source='organization_name', read_only=True)
-    supportEmail = serializers.EmailField(source='support_email', read_only=True)
-    supportPhone = serializers.CharField(source='support_phone', read_only=True)
+    organizationName = serializers.CharField(source='organization_name', required=False, allow_blank=True)
+    supportEmail = serializers.EmailField(source='support_email', required=False, allow_blank=True)
+    supportPhone = serializers.CharField(source='support_phone', required=False, allow_blank=True)
     logoUrl = serializers.SerializerMethodField()
-    logo_url = serializers.SerializerMethodField()
-    passPlatformFeeToBuyer = serializers.BooleanField(source='pass_platform_fee_to_buyer', read_only=True)
-    allowTicketTransfers = serializers.BooleanField(source='allow_ticket_transfers', read_only=True)
-    requireAttendeePhone = serializers.BooleanField(source='require_attendee_phone', read_only=True)
-    autoRefundCancelledEvents = serializers.BooleanField(source='auto_refund_cancelled_events', read_only=True)
-    instantSaleAlerts = serializers.BooleanField(source='instant_sale_alerts', read_only=True)
-    dailySummaryDigest = serializers.BooleanField(source='daily_summary_digest', read_only=True)
-    payoutDisbursementEmail = serializers.BooleanField(source='payout_disbursement_email', read_only=True)
+    logo_url = serializers.CharField(required=False, allow_blank=True)
+    logo = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    passPlatformFeeToBuyer = serializers.BooleanField(source='pass_platform_fee_to_buyer', required=False)
+    allowTicketTransfers = serializers.BooleanField(source='allow_ticket_transfers', required=False)
+    requireAttendeePhone = serializers.BooleanField(source='require_attendee_phone', required=False)
+    autoRefundCancelledEvents = serializers.BooleanField(source='auto_refund_cancelled_events', required=False)
+    instantSaleAlerts = serializers.BooleanField(source='instant_sale_alerts', required=False)
+    dailySummaryDigest = serializers.BooleanField(source='daily_summary_digest', required=False)
+    payoutDisbursementEmail = serializers.BooleanField(source='payout_disbursement_email', required=False)
 
     class Meta:
         model = OrganizerProfile
         fields = (
             'id', 'organization_name', 'organizationName', 'handle',
             'support_email', 'supportEmail', 'website', 'bio',
-            'support_phone', 'supportPhone', 'instagram', 'logo_url', 'logoUrl',
+            'support_phone', 'supportPhone', 'instagram', 'logo', 'logo_url', 'logoUrl',
             'pass_platform_fee_to_buyer', 'passPlatformFeeToBuyer',
             'allow_ticket_transfers', 'allowTicketTransfers',
             'require_attendee_phone', 'requireAttendeePhone',
@@ -292,9 +557,6 @@ class OrganizerProfileSerializer(serializers.ModelSerializer):
     def get_logoUrl(self, obj):
         return self._resolve_logo(obj.logo_url)
 
-    def get_logo_url(self, obj):
-        return self._resolve_logo(obj.logo_url)
-
     def to_internal_value(self, data):
         data = data.copy() if hasattr(data, 'copy') else dict(data)
         mapping = {
@@ -316,10 +578,21 @@ class OrganizerProfileSerializer(serializers.ModelSerializer):
                 data[snake] = data.pop(camel)
 
         logo_val = data.get('logo_url')
-        if logo_val and isinstance(logo_val, str) and logo_val.startswith('data:image/'):
-            data['logo_url'] = save_organizer_logo(logo_val)
+        if logo_val is not None:
+            if logo_val == '':
+                data['logo_url'] = ''
+            elif isinstance(logo_val, str) and logo_val.startswith(('http://', 'https://')):
+                data['logo_url'] = logo_val
+            elif hasattr(logo_val, 'read') or (isinstance(logo_val, str) and logo_val.startswith('data:image/')):
+                data['logo_url'] = save_organizer_logo(logo_val)
 
         return super().to_internal_value(data)
+
+    def update(self, instance, validated_data):
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
 
 
 class StudioStaffMemberSerializer(serializers.ModelSerializer):

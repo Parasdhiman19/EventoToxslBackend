@@ -122,13 +122,19 @@ class AccountsAuthTests(TestCase):
         settings_res = self.client.get('/api/auth/settings/')
         self.assertEqual(settings_res.status_code, status.HTTP_200_OK)
 
-        # Patch settings
+        # Patch settings including logoUrl
         patch_res = self.client.patch('/api/auth/settings/', {
             'organizationName': 'Updated Studio LLC',
-            'instagram': '@updatedstudio'
+            'instagram': '@updatedstudio',
+            'logoUrl': 'https://res.cloudinary.com/demo/image/upload/studio_logo.png'
         }, format='json')
         self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
         self.assertEqual(patch_res.data['profile']['organizationName'], 'Updated Studio LLC')
+        self.assertEqual(patch_res.data['profile']['logoUrl'], 'https://res.cloudinary.com/demo/image/upload/studio_logo.png')
+
+        # Verify persisted in database
+        self.org_profile.refresh_from_db()
+        self.assertEqual(self.org_profile.logo_url, 'https://res.cloudinary.com/demo/image/upload/studio_logo.png')
 
         # Add settlement account (PayPal)
         acc_res = self.client.post('/api/auth/settlement-accounts/', {
@@ -182,5 +188,63 @@ class AccountsAuthTests(TestCase):
         # 5. Verify roster empty
         list_res_2 = self.client.get('/api/auth/studio-staff/')
         self.assertEqual(len(list_res_2.data), 0)
+
+    def test_update_user_profile(self):
+        login_res = self.client.post('/api/auth/login/', {
+            'email': 'testuser@evento.com',
+            'password': 'Password123!'
+        })
+        token = login_res.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        patch_res = self.client.patch('/api/auth/me/', {
+            'fullName': 'Paras Dhiman',
+            'username': 'paras_dhiman',
+            'bio': 'Passionate event attendee & tech lover',
+            'phone': '+91 98765 43210',
+            'city': 'Chandigarh',
+            'emailNotifications': False,
+            'avatarUrl': 'https://res.cloudinary.com/demo/image/upload/avatar.jpg'
+        }, format='json')
+
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_res.data['user']['fullName'], 'Paras Dhiman')
+        self.assertEqual(patch_res.data['user']['username'], 'paras_dhiman')
+        self.assertEqual(patch_res.data['user']['bio'], 'Passionate event attendee & tech lover')
+        self.assertEqual(patch_res.data['user']['phone'], '+91 98765 43210')
+        self.assertEqual(patch_res.data['user']['city'], 'Chandigarh')
+        self.assertFalse(patch_res.data['user']['emailNotifications'])
+        self.assertEqual(patch_res.data['user']['avatarUrl'], 'https://res.cloudinary.com/demo/image/upload/avatar.jpg')
+
+    def test_change_password_success_and_failure(self):
+        login_res = self.client.post('/api/auth/login/', {
+            'email': 'testuser@evento.com',
+            'password': 'Password123!'
+        })
+        token = login_res.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        # 1. Invalid old password fails
+        fail_res = self.client.post('/api/auth/change-password/', {
+            'oldPassword': 'WrongOldPassword',
+            'newPassword': 'NewSecurePassword123!'
+        }, format='json')
+        self.assertEqual(fail_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 2. Valid old password succeeds
+        ok_res = self.client.post('/api/auth/change-password/', {
+            'oldPassword': 'Password123!',
+            'newPassword': 'NewSecurePassword123!'
+        }, format='json')
+        self.assertEqual(ok_res.status_code, status.HTTP_200_OK)
+
+        # 3. Verify user can now log in with new password
+        self.client.credentials()  # Clear credentials
+        new_login = self.client.post('/api/auth/login/', {
+            'email': 'testuser@evento.com',
+            'password': 'NewSecurePassword123!'
+        })
+        self.assertEqual(new_login.status_code, status.HTTP_200_OK)
+
 
 
