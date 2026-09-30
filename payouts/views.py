@@ -14,12 +14,15 @@ from accounts.serializers import SettlementAccountSerializer
 
 def calculate_organizer_financials(user):
     """
-    Computes accurate financial totals for an organizer respecting each event's fee policy:
-    - gross_ticket_sales: Total face value of tickets sold
+    Computes accurate financial totals for an organizer respecting each event's lifecycle & fee policy:
+    - gross_ticket_sales: Total face value of confirmed tickets sold
     - total_platform_fees: Total platform fees collected (from buyer or organizer)
-    - organizer_net_earnings: Total net revenue earned by organizer
+    - organizer_net_earnings: Total lifetime net revenue earned across all valid stages
+    - cleared_earnings: Net revenue from concluded/past stages eligible for withdrawal
+    - pending_escrow: Net revenue from upcoming/live stages held in platform escrow
+    - cancelled_volume: Gross volume of cancelled events (held for refunds)
     - disbursed_total: Total amount already withdrawn via completed payouts
-    - available_balance: Remaining funds available for withdrawal
+    - available_balance: Remaining cleared funds available for immediate withdrawal
     """
     user_events = Event.objects.filter(organizer=user)
     confirmed_orders = Order.objects.filter(
@@ -30,6 +33,9 @@ def calculate_organizer_financials(user):
     gross_ticket_sales = Decimal('0.00')
     total_platform_fees = Decimal('0.00')
     organizer_net_earnings = Decimal('0.00')
+    cleared_earnings = Decimal('0.00')
+    pending_escrow = Decimal('0.00')
+    cancelled_volume = Decimal('0.00')
 
     for order in confirmed_orders:
         subtotal = (order.unit_price * order.quantity).quantize(Decimal('0.01'))
@@ -37,24 +43,41 @@ def calculate_organizer_financials(user):
 
         pass_to_buyer = getattr(order.event, 'pass_platform_fee_to_buyer', True)
         if pass_to_buyer:
-            # Buyer paid the fee; organizer receives 100% of ticket subtotal with zero fee cut
-            organizer_net_earnings += subtotal
+            net_for_order = subtotal
             total_platform_fees += order.fees
         else:
-            # Organizer absorbs the 3.5% fee
             fee = (subtotal * Decimal('0.035')).quantize(Decimal('0.01'))
             total_platform_fees += fee
-            organizer_net_earnings += (subtotal - fee)
+            net_for_order = subtotal - fee
+
+        ev = order.event
+        if ev.status == 'cancelled':
+            cancelled_volume += subtotal
+        elif ev.status == 'past' or ev.is_ended:
+            cleared_earnings += net_for_order
+            organizer_net_earnings += net_for_order
+        else:
+            # Active / published upcoming stage: held in escrow
+            pending_escrow += net_for_order
+            organizer_net_earnings += net_for_order
 
     payouts_completed = Payout.objects.filter(organizer=user, status__in=['Completed', 'Processing'])
     disbursed_total = payouts_completed.aggregate(total=Sum('net_disbursed'))['total'] or Decimal('0.00')
-    available_balance = max(Decimal('0.00'), organizer_net_earnings - disbursed_total)
+
+    payouts_pending = Payout.objects.filter(organizer=user, status='Pending')
+    pending_payouts_total = payouts_pending.aggregate(total=Sum('gross_amount'))['total'] or Decimal('0.00')
+
+    available_balance = max(Decimal('0.00'), cleared_earnings - disbursed_total - pending_payouts_total)
 
     return {
         'gross_ticket_sales': gross_ticket_sales,
         'total_platform_fees': total_platform_fees,
         'organizer_net_earnings': organizer_net_earnings,
+        'cleared_earnings': cleared_earnings,
+        'pending_escrow': pending_escrow,
+        'cancelled_volume': cancelled_volume,
         'disbursed_total': disbursed_total,
+        'pending_payouts_total': pending_payouts_total,
         'available_balance': available_balance,
     }
 
@@ -178,21 +201,21 @@ class ManagerPayoutsView(views.APIView):
         lifetime_sales = financials['gross_ticket_sales']
         platform_fees = financials['total_platform_fees']
         available_balance = financials['available_balance']
-        pending_escrow = (available_balance * Decimal('0.55')).quantize(Decimal('0.01'))
+        pending_escrow = financials['pending_escrow']
 
         balance_cards = [
             {
                 'label': 'Available for Payout',
                 'value': f"${available_balance:,.2f}",
                 'amount': float(available_balance),
-                'sub': 'Cleared from ticket sales • Ready to withdraw',
+                'sub': 'Cleared from concluded stages • Ready to withdraw',
                 'primary': True,
             },
             {
                 'label': 'Pending Escrow',
                 'value': f"${pending_escrow:,.2f}",
                 'amount': float(pending_escrow),
-                'sub': 'Clears 48h after respective stage wraps',
+                'sub': 'Held in reserve • Clears once respective stage wraps',
                 'primary': False,
             },
             {
@@ -221,13 +244,21 @@ class ManagerPayoutsView(views.APIView):
             pass_to_buyer = getattr(ev, 'pass_platform_fee_to_buyer', True)
             ev_fees = Decimal('0.00') if pass_to_buyer else (ev_gross * Decimal('0.035')).quantize(Decimal('0.01'))
             ev_net = ev_gross - ev_fees
+
+            if ev.status == 'cancelled':
+                settle_status = 'Cancelled / Refunded'
+            elif ev.status == 'past' or ev.is_ended:
+                settle_status = 'Cleared'
+            else:
+                settle_status = 'In Escrow (Active Stage)'
+
             revenue_by_event.append({
                 'name': ev.title,
                 'gross': f"${ev_gross:,.2f}",
                 'fees': f"${ev_fees:,.2f}",
-                'refunds': '$0.00',
-                'net': f"${ev_net:,.2f}",
-                'status': 'Settling' if ev.status == 'published' else 'Completed',
+                'refunds': '$0.00' if ev.status != 'cancelled' else f"${ev_gross:,.2f}",
+                'net': f"${ev_net:,.2f}" if ev.status != 'cancelled' else '$0.00',
+                'status': settle_status,
             })
 
         payout_history = Payout.objects.filter(organizer=request.user).order_by('-created_at')
@@ -325,8 +356,13 @@ class RequestPayoutView(views.APIView):
 
         # 2. Check available funds
         if available <= 0:
+            pending_escrow = financials.get('pending_escrow', Decimal('0.00'))
+            if pending_escrow > 0:
+                return Response({
+                    'detail': f"Funds from active stages (${pending_escrow:,.2f}) are currently held in Escrow Reserves. Funds clear into your withdrawable balance once each stage concludes."
+                }, status=status.HTTP_400_BAD_REQUEST)
             return Response({
-                'detail': 'No funds currently available for disbursement.'
+                'detail': 'No cleared funds currently available for disbursement.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # 3. Minimum withdrawal threshold ($10.00)

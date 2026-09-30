@@ -266,7 +266,9 @@ class ManagerEventDetailView(views.APIView):
         if not event:
             return Response({'detail': 'Event not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
 
-        permanent = request.query_params.get('permanent', '').lower() in ['true', '1']
+        action = request.query_params.get('action', '').lower()
+        permanent = request.query_params.get('permanent', '').lower() in ['true', '1'] or (action == 'delete')
+
         if permanent:
             has_sales = event.orders.filter(status__in=['Confirmed', 'Paid', 'Completed', 'Refunded']).exists()
             has_attendees = event.attendees.exists()
@@ -275,7 +277,7 @@ class ManagerEventDetailView(views.APIView):
             if has_sales or has_attendees or has_sold_tiers:
                 return Response(
                     {
-                        'detail': 'Cannot permanently delete an event with confirmed ticket sales, attendee passports, or financial transactions. Please archive or end the event instead to preserve financial and attendee records.',
+                        'detail': 'Cannot permanently delete an event with confirmed ticket sales, attendee passports, or financial transactions. Please cancel or archive the event instead to preserve financial and attendee records.',
                         'can_delete': False,
                         'has_sales': True,
                     },
@@ -285,8 +287,28 @@ class ManagerEventDetailView(views.APIView):
             event.delete()
             return Response({'detail': 'Event permanently deleted successfully.', 'deleted': True})
 
+        if action == 'cancel':
+            event.status = 'cancelled'
+            event.save(update_fields=['status'])
+
+            # Notify attendees about event cancellation
+            try:
+                from notifications.services import NotificationService
+                from tickets.models import Order
+                attendee_ids = Order.objects.filter(
+                    event=event, status__in=['Confirmed', 'Paid', 'Completed']
+                ).values_list('user_id', flat=True).distinct()
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                for attendee in User.objects.filter(pk__in=attendee_ids).exclude(pk=request.user.pk):
+                    NotificationService.send_event_updated(attendee, event)
+            except Exception:
+                pass
+
+            return Response({'detail': 'Event marked as cancelled successfully.', 'status': 'cancelled', 'cancelled': True})
+
         event.status = 'past'
-        event.save()
+        event.save(update_fields=['status'])
         return Response({'detail': 'Event archived and ended successfully.', 'status': 'past', 'archived': True})
 
 

@@ -369,12 +369,20 @@ class TicketsTests(TestCase):
         self.assertEqual(checkout_res.data['fees'], '$2.45')
         self.assertEqual(checkout_res.data['total'], '$72.45')
 
-        # Check organizer available payout balance -> Should be exactly $70.00 (no double cut)
+        # Check organizer escrow while event is active/upcoming
         from payouts.views import calculate_organizer_financials
         fin = calculate_organizer_financials(self.manager)
         self.assertEqual(fin['gross_ticket_sales'], Decimal('70.00'))
         self.assertEqual(fin['organizer_net_earnings'], Decimal('70.00'))
-        self.assertEqual(fin['available_balance'], Decimal('70.00'))
+        self.assertEqual(fin['pending_escrow'], Decimal('70.00'))
+        self.assertEqual(fin['available_balance'], Decimal('0.00'))
+
+        # Once event concludes/wraps, escrow clears into available_balance for payout
+        self.event.status = 'past'
+        self.event.save()
+        fin_ended = calculate_organizer_financials(self.manager)
+        self.assertEqual(fin_ended['cleared_earnings'], Decimal('70.00'))
+        self.assertEqual(fin_ended['available_balance'], Decimal('70.00'))
 
     def test_fee_calculation_when_absorbed_by_organizer(self):
         # Event with pass_platform_fee_to_buyer=False
@@ -400,12 +408,20 @@ class TicketsTests(TestCase):
         self.assertEqual(checkout_res.data['fees'], '$0.00')
         self.assertEqual(checkout_res.data['total'], '$70.00')
 
-        # Check organizer available payout balance -> $70.00 - 3.5% ($2.45) = $67.55
+        # Check organizer financial breakdown while event is active (in escrow)
         from payouts.views import calculate_organizer_financials
         fin = calculate_organizer_financials(self.manager)
         self.assertEqual(fin['gross_ticket_sales'], Decimal('70.00'))
         self.assertEqual(fin['total_platform_fees'], Decimal('2.45'))
         self.assertEqual(fin['organizer_net_earnings'], Decimal('67.55'))
-        self.assertEqual(fin['available_balance'], Decimal('67.55'))
+        self.assertEqual(fin['pending_escrow'], Decimal('67.55'))
+        self.assertEqual(fin['available_balance'], Decimal('0.00'))
+
+        # Once event concludes/wraps, escrow clears into available_balance for payout
+        self.event.status = 'past'
+        self.event.save()
+        fin_ended = calculate_organizer_financials(self.manager)
+        self.assertEqual(fin_ended['cleared_earnings'], Decimal('67.55'))
+        self.assertEqual(fin_ended['available_balance'], Decimal('67.55'))
 
 
