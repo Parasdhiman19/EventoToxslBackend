@@ -32,7 +32,7 @@ def get_active_events_condition():
     return Q(status='published') & (
         Q(date__gt=current_date) |
         Q(date=current_date, end_time__isnull=False, end_time__gt=current_time) |
-        Q(date=current_date, end_time__isnull=True, start_time__gte=current_time)
+        Q(date=current_date, end_time__isnull=True)
     )
 
 
@@ -124,6 +124,16 @@ class EventDetailView(views.APIView):
     def get(self, request, pk):
         try:
             event = Event.objects.get(pk=pk)
+            # If event is draft, only allow organizer or assigned staff
+            if event.status == 'draft':
+                is_authorized = (
+                    request.user.is_authenticated and (
+                        event.organizer_id == request.user.id or
+                        event.staff_members.filter(user=request.user).exists()
+                    )
+                )
+                if not is_authorized:
+                    return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
             return Response(PublicEventDetailSerializer(event, context={'request': request}).data)
         except Event.DoesNotExist:
             return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -162,7 +172,7 @@ class ManagerEventListCreateView(views.APIView):
                 Q(status='published') & (
                     Q(date__gt=current_date) |
                     Q(date=current_date, end_time__isnull=False, end_time__gt=current_time) |
-                    Q(date=current_date, end_time__isnull=True, start_time__gte=current_time)
+                    Q(date=current_date, end_time__isnull=True)
                 )
             )
         elif status_tab == 'draft':
@@ -174,8 +184,7 @@ class ManagerEventListCreateView(views.APIView):
                 (
                     Q(status='published') & (
                         Q(date__lt=current_date) |
-                        Q(date=current_date, end_time__isnull=False, end_time__lte=current_time) |
-                        Q(date=current_date, end_time__isnull=True, start_time__lt=current_time)
+                        Q(date=current_date, end_time__isnull=False, end_time__lte=current_time)
                     )
                 )
             )
@@ -186,10 +195,17 @@ class ManagerEventListCreateView(views.APIView):
     def post(self, request):
         serializer = EventCreateUpdateSerializer(data=request.data)
 
-
-        
         if serializer.is_valid():
             event = serializer.save(organizer=request.user)
+
+            # Notify organizer when their event is published
+            if event.status == 'published':
+                try:
+                    from notifications.services import NotificationService
+                    NotificationService.send_event_published(request.user, event)
+                except Exception:
+                    pass
+
             return Response(ManagerEventDetailSerializer(event, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -214,9 +230,34 @@ class ManagerEventDetailView(views.APIView):
         event = Event.objects.filter(pk=pk, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
+
+        prev_status = event.status
         serializer = EventCreateUpdateSerializer(event, data=request.data, partial=True)
         if serializer.is_valid():
             updated = serializer.save()
+
+            # Notify organizer if event just became published
+            if prev_status != 'published' and updated.status == 'published':
+                try:
+                    from notifications.services import NotificationService
+                    NotificationService.send_event_published(request.user, updated)
+                except Exception:
+                    pass
+            elif updated.status == 'published' and prev_status == 'published':
+                # Notify all confirmed attendees about the update
+                try:
+                    from notifications.services import NotificationService
+                    from tickets.models import Order
+                    attendee_ids = Order.objects.filter(
+                        event=updated, status__in=['Confirmed', 'Paid', 'Completed']
+                    ).values_list('user_id', flat=True).distinct()
+                    from django.contrib.auth import get_user_model
+                    User = get_user_model()
+                    for attendee in User.objects.filter(pk__in=attendee_ids).exclude(pk=request.user.pk):
+                        NotificationService.send_event_updated(attendee, updated)
+                except Exception:
+                    pass
+
             return Response(ManagerEventDetailSerializer(updated, context={'request': request}).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -592,6 +633,16 @@ class PublicEventSeatingView(views.APIView):
         if not event:
             return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        if event.status == 'draft':
+            if not request.user.is_authenticated:
+                return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
+            is_staff_or_organizer = (
+                event.organizer_id == request.user.id or
+                event.staff_members.filter(user=request.user).exists()
+            )
+            if not is_staff_or_organizer:
+                return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
+
         seats = event.seats.all().select_related('tier')
         return Response({
             'eventId': event.id,
@@ -738,6 +789,25 @@ class EventCommentListCreateView(views.APIView):
             parent=parent_comment,
             content=serializer.validated_data['content']
         )
+
+        # ── Notifications ──────────────────────────────────────────────
+        try:
+            from notifications.services import NotificationService
+            # Notify event organizer about the new comment
+            organizer = getattr(event, 'organizer', None)
+            if organizer:
+                NotificationService.send_event_comment_received(organizer, event, request.user)
+
+            # If this is a reply, notify the parent comment author
+            if parent_comment and parent_comment.user and parent_comment.user != request.user:
+                NotificationService.send_comment_replied(
+                    recipient=parent_comment.user,
+                    event=event,
+                    actor=request.user,
+                    parent_comment_id=parent_comment.id,
+                )
+        except Exception:
+            pass
 
         return Response(
             CommentSerializer(comment, context={'request': request, 'include_replies': True}).data,

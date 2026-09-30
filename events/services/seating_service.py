@@ -74,6 +74,16 @@ def sync_seating_layout_to_db(event, seating_layout):
             tier_model_map[t_name.lower()] = tier_obj
 
     # Synchronize Seats
+    fallback_tier = event.tiers.first()
+    if not fallback_tier:
+        fallback_tier = TicketTier.objects.create(
+            event=event,
+            name='General Admission',
+            price=Decimal('25.00'),
+            capacity=max(100, len(grid)),
+            description='Standard Admission'
+        )
+
     existing_seats = {
         (s.section_name, s.row, str(s.seat_number)): s
         for s in event.seats.all()
@@ -93,7 +103,7 @@ def sync_seating_layout_to_db(event, seating_layout):
         key = (sec, row, num)
         active_seat_keys.add(key)
         t_name = (seat_data.get('tierName') or seat_data.get('tier') or 'General Admission').strip().lower()
-        tier_obj = tier_model_map.get(t_name) or event.tiers.first()
+        tier_obj = tier_model_map.get(t_name) or fallback_tier
         is_acc = bool(seat_data.get('isAccessible') or seat_data.get('is_accessible'))
         raw_status = seat_data.get('status', 'available')
         seat_status = raw_status if raw_status in ['available', 'reserved', 'booked', 'blocked'] else 'available'

@@ -1,8 +1,36 @@
 from decimal import Decimal
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 from .models import Order, AttendeeTicket
 from events.models import Event, TicketTier
+from events.utils.media_utils import resolve_image_url
+
+
+def extract_ticket_organizer(event, request=None):
+    if not event or not getattr(event, 'organizer', None):
+        return {
+            'name': 'Nexus Productions',
+            'logo': '',
+            'handle': 'nexus_productions',
+        }
+    organizer_user = event.organizer
+    org_profile = getattr(organizer_user, 'organizer_profile', None)
+    if org_profile:
+        name = org_profile.organization_name or organizer_user.full_name or 'Nexus Productions'
+        logo_url = resolve_image_url(org_profile.logo_url, request) if org_profile.logo_url else ''
+        handle = org_profile.handle or ''
+        return {
+            'name': name,
+            'logo': logo_url,
+            'handle': handle,
+        }
+    avatar = getattr(organizer_user, 'avatar_url', '')
+    return {
+        'name': getattr(organizer_user, 'full_name', '') or 'Nexus Productions',
+        'logo': resolve_image_url(avatar, request) if avatar else '',
+        'handle': getattr(organizer_user, 'username', '') or '',
+    }
 
 
 class AttendeeTicketSerializer(serializers.ModelSerializer):
@@ -13,6 +41,9 @@ class AttendeeTicketSerializer(serializers.ModelSerializer):
     eventTitle = serializers.CharField(source='event.title', read_only=True)
     event = serializers.CharField(source='event.title', read_only=True)
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
     tier = serializers.CharField(source='tier.name', read_only=True)
     price = serializers.SerializerMethodField()
     date = serializers.SerializerMethodField()
@@ -31,23 +62,33 @@ class AttendeeTicketSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='attendee_name', read_only=True)
     email = serializers.CharField(source='attendee_email', read_only=True)
     checkedIn = serializers.BooleanField(source='is_checked_in', read_only=True)
+    is_checked_in = serializers.BooleanField(read_only=True)
     checkInTime = serializers.SerializerMethodField()
+    check_in_time = serializers.SerializerMethodField()
     orderDate = serializers.SerializerMethodField()
 
     class Meta:
         model = AttendeeTicket
         fields = (
             'id', 'ticketCode', 'barcode', 'orderId', 'eventTitle', 'event',
-            'organizer', 'tier', 'price', 'date', 'doorsOpen', 'showStarts',
+            'organizer', 'organizerLogo', 'organizer_logo', 'organizerHandle',
+            'tier', 'price', 'date', 'doorsOpen', 'showStarts',
             'venue', 'address', 'gate', 'seatOrGate', 'seat', 'seatRow',
             'seatNumber', 'sectionName', 'status', 'attendeeName',
-            'name', 'email', 'checkedIn', 'checkInTime', 'orderDate'
+            'name', 'email', 'checkedIn', 'is_checked_in', 'checkInTime', 'check_in_time', 'orderDate'
         )
 
     def get_organizer(self, obj):
-        if hasattr(obj.event.organizer, 'organizer_profile') and obj.event.organizer.organizer_profile.organization_name:
-            return obj.event.organizer.organizer_profile.organization_name
-        return obj.event.organizer.full_name or "Nexus Productions"
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['handle']
 
     def get_price(self, obj):
         return f"${obj.tier.price:,.2f}"
@@ -98,10 +139,21 @@ class AttendeeTicketSerializer(serializers.ModelSerializer):
         return 'past' if obj.event.is_ended or obj.event.computed_status == 'past' else 'upcoming'
 
     def get_checkInTime(self, obj):
-        return obj.checked_in_at.strftime('%I:%M %p') if obj.checked_in_at else None
+        if not obj.checked_in_at:
+            return None
+        from django.utils import timezone
+        dt = timezone.localtime(obj.checked_in_at) if timezone.is_aware(obj.checked_in_at) else obj.checked_in_at
+        return dt.strftime('%I:%M %p')
+
+    def get_check_in_time(self, obj):
+        return self.get_checkInTime(obj)
 
     def get_orderDate(self, obj):
-        return obj.created_at.strftime('%b %d, %Y') if obj.created_at else ''
+        if not obj.created_at:
+            return ''
+        from django.utils import timezone
+        dt = timezone.localtime(obj.created_at) if timezone.is_aware(obj.created_at) else obj.created_at
+        return dt.strftime('%b %d, %Y')
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -111,6 +163,9 @@ class OrderSerializer(serializers.ModelSerializer):
     eventTitle = serializers.CharField(source='event.title', read_only=True)
     event = serializers.CharField(source='event.title', read_only=True)
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
     tier = serializers.CharField(source='tier.name', read_only=True)
     unitPrice = serializers.SerializerMethodField()
     fees = serializers.SerializerMethodField()
@@ -126,8 +181,9 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = (
-            'id', 'date', 'time', 'eventTitle', 'event', 'organizer', 'tier',
-            'quantity', 'qty', 'unitPrice', 'fees', 'total', 'paymentMethod',
+            'id', 'date', 'time', 'eventTitle', 'event',
+            'organizer', 'organizerLogo', 'organizer_logo', 'organizerHandle',
+            'tier', 'quantity', 'qty', 'unitPrice', 'fees', 'total', 'paymentMethod',
             'status', 'venue', 'eventDate', 'ticketIds', 'customer', 'email'
         )
 
@@ -138,9 +194,16 @@ class OrderSerializer(serializers.ModelSerializer):
         return obj.created_at.strftime('%I:%M %p')
 
     def get_organizer(self, obj):
-        if hasattr(obj.event.organizer, 'organizer_profile') and obj.event.organizer.organizer_profile.organization_name:
-            return obj.event.organizer.organizer_profile.organization_name
-        return obj.event.organizer.full_name or "Nexus Productions"
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_ticket_organizer(obj.event, self.context.get('request'))['handle']
 
     def get_unitPrice(self, obj):
         return f"${obj.unit_price:,.2f}"
@@ -200,8 +263,15 @@ class CheckoutSerializer(serializers.Serializer):
             if len(seat_objs) != len(seat_ids):
                 raise serializers.ValidationError({"seatIds": "One or more selected seats could not be found for this event."})
 
+            now_dt = timezone.now()
+            user = self.context.get('request').user if (self.context.get('request') and self.context.get('request').user.is_authenticated) else None
             for s in seat_objs:
-                if s.status != 'available':
+                is_available = (
+                    s.status == 'available' or
+                    (s.status == 'reserved' and s.reserved_until and s.reserved_until < now_dt) or
+                    (s.status == 'reserved' and user and s.reserved_by == user)
+                )
+                if not is_available:
                     raise serializers.ValidationError({"seatIds": f"Seat {s.row}-{s.seat_number} is no longer available."})
 
             attrs['quantity'] = len(seat_objs)
@@ -263,8 +333,14 @@ class CheckoutSerializer(serializers.Serializer):
             if len(locked_seats) != len(seat_ids):
                 raise serializers.ValidationError({"seatIds": "Selected seats could not be found."})
 
+            now_dt = timezone.now()
             for s in locked_seats:
-                if s.status != 'available':
+                is_available = (
+                    s.status == 'available' or
+                    (s.status == 'reserved' and s.reserved_until and s.reserved_until < now_dt) or
+                    (s.status == 'reserved' and s.reserved_by == user)
+                )
+                if not is_available:
                     raise serializers.ValidationError({"seatIds": f"Seat {s.row}-{s.seat_number} was just booked by another attendee. Please choose different seats."})
 
             quantity = len(locked_seats)
@@ -314,6 +390,9 @@ class CheckoutSerializer(serializers.Serializer):
                 t_obj.sold_count += cnt
                 t_obj.save()
 
+            # ── Notifications ──────────────────────────────────────────────
+            self._fire_notifications(order, event)
+
             return order
 
         else:
@@ -354,5 +433,39 @@ class CheckoutSerializer(serializers.Serializer):
             tier.sold_count += quantity
             tier.save()
 
+            # ── Notifications ──────────────────────────────────────────────
+            self._fire_notifications(order, event)
+
             return order
 
+    @staticmethod
+    def _fire_notifications(order, event):
+        """Fire buyer + organizer notifications after a successful checkout."""
+        try:
+            from notifications.services import NotificationService
+            buyer = order.user
+            first_ticket = order.tickets.first()
+
+            # Buyer notifications
+            NotificationService.send_order_placed(buyer, order)
+            NotificationService.send_ticket_issued(buyer, order, first_ticket)
+
+            # Organizer notifications
+            organizer = getattr(event, 'organizer', None)
+            if organizer:
+                NotificationService.send_ticket_sold(organizer, order)
+
+                # Check sold-out or low inventory (across all tiers)
+                total_capacity = sum(t.capacity for t in event.tiers.all())
+                total_sold = sum(t.sold_count for t in event.tiers.all())
+                remaining = total_capacity - total_sold
+
+                if total_capacity > 0 and total_sold >= total_capacity:
+                    NotificationService.send_event_sold_out(organizer, event)
+                elif total_capacity > 0 and remaining <= max(1, int(total_capacity * 0.10)):
+                    NotificationService.send_event_low_inventory(organizer, event, remaining)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                f'[CheckoutSerializer] Notification hook failed: {exc}'
+            )

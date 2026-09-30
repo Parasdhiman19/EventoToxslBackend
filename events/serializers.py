@@ -94,12 +94,62 @@ class SeatSerializer(serializers.ModelSerializer):
 
 
 
+def extract_organizer_details(obj, request=None):
+    """
+    Safely resolves organizer name, logo URL, handle, bio, website, and social links.
+    """
+    organizer_user = getattr(obj, 'organizer', None)
+    if not organizer_user:
+        return {
+            'name': 'Nexus Productions',
+            'logo': '',
+            'handle': 'nexus_productions',
+            'bio': '',
+            'website': '',
+            'instagram': '',
+        }
+    
+    org_profile = getattr(organizer_user, 'organizer_profile', None)
+    if org_profile:
+        name = org_profile.organization_name or organizer_user.full_name or 'Nexus Productions'
+        logo_url = resolve_image_url(org_profile.logo_url, request) if org_profile.logo_url else ''
+        handle = org_profile.handle or ''
+        bio = org_profile.bio or ''
+        website = org_profile.website or ''
+        instagram = org_profile.instagram or ''
+        return {
+            'name': name,
+            'logo': logo_url,
+            'handle': handle,
+            'bio': bio,
+            'website': website,
+            'instagram': instagram,
+        }
+    
+    avatar = getattr(organizer_user, 'avatar_url', '')
+    return {
+        'name': getattr(organizer_user, 'full_name', '') or 'Nexus Productions',
+        'logo': resolve_image_url(avatar, request) if avatar else '',
+        'handle': getattr(organizer_user, 'username', '') or '',
+        'bio': getattr(organizer_user, 'bio', '') or '',
+        'website': '',
+        'instagram': '',
+    }
+
+
 class PublicEventListSerializer(serializers.ModelSerializer):
     """
     Public discovery event serializer.
     Excludes sensitive financial metrics (grossRevenue, ticketsSold, totalCapacity, staff permissions).
     """
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
+    organizer_handle = serializers.SerializerMethodField()
+    organizerBio = serializers.SerializerMethodField()
+    organizerWebsite = serializers.SerializerMethodField()
+    organizerInstagram = serializers.SerializerMethodField()
     venue = serializers.CharField(source='venue_name', read_only=True)
     venueName = serializers.CharField(source='venue_name', read_only=True)
     time = serializers.SerializerMethodField()
@@ -124,7 +174,9 @@ class PublicEventListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = (
-            'id', 'title', 'organizer', 'category', 'date', 'dateFormatted',
+            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo',
+            'organizerHandle', 'organizer_handle', 'organizerBio', 'organizerWebsite', 'organizerInstagram',
+            'category', 'date', 'dateFormatted',
             'time', 'start_time', 'startTime', 'end_time', 'endTime',
             'city', 'venue', 'venueName', 'venue_name', 'address', 'is_online',
             'startingPrice', 'priceRange', 'image', 'banner', 'banner_image',
@@ -152,13 +204,28 @@ class PublicEventListSerializer(serializers.ModelSerializer):
         return resolve_image_url(obj.banner_image, self.context.get('request'))
 
     def get_organizer(self, obj):
-        try:
-            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
-                if obj.organizer.organizer_profile.organization_name:
-                    return obj.organizer.organizer_profile.organization_name
-        except Exception:
-            pass
-        return getattr(obj.organizer, 'full_name', '') or "Nexus Productions"
+        return extract_organizer_details(obj, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizer_handle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizerBio(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['bio']
+
+    def get_organizerWebsite(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['website']
+
+    def get_organizerInstagram(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['instagram']
 
     def get_time(self, obj):
         return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
@@ -217,6 +284,13 @@ class PublicEventDetailSerializer(serializers.ModelSerializer):
     Uses PublicTicketTierSerializer to hide gross sales and sold counts.
     """
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
+    organizer_handle = serializers.SerializerMethodField()
+    organizerBio = serializers.SerializerMethodField()
+    organizerWebsite = serializers.SerializerMethodField()
+    organizerInstagram = serializers.SerializerMethodField()
     venue = serializers.CharField(source='venue_name', read_only=True)
     venueName = serializers.CharField(source='venue_name', read_only=True)
     time = serializers.SerializerMethodField()
@@ -245,7 +319,9 @@ class PublicEventDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = (
-            'id', 'title', 'organizer', 'category', 'description', 'date', 'dateFormatted',
+            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo',
+            'organizerHandle', 'organizer_handle', 'organizerBio', 'organizerWebsite', 'organizerInstagram',
+            'category', 'description', 'date', 'dateFormatted',
             'start_time', 'end_time', 'startTime', 'endTime', 'time',
             'venue_name', 'venueName', 'venue', 'city', 'address',
             'is_online', 'status', 'isEnded', 'is_ended', 'is_featured', 'image', 'banner', 'banner_image',
@@ -275,13 +351,28 @@ class PublicEventDetailSerializer(serializers.ModelSerializer):
         return resolve_image_url(obj.banner_image, self.context.get('request'))
 
     def get_organizer(self, obj):
-        try:
-            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
-                if obj.organizer.organizer_profile.organization_name:
-                    return obj.organizer.organizer_profile.organization_name
-        except Exception:
-            pass
-        return getattr(obj.organizer, 'full_name', '') or "Nexus Productions"
+        return extract_organizer_details(obj, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizer_handle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizerBio(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['bio']
+
+    def get_organizerWebsite(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['website']
+
+    def get_organizerInstagram(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['instagram']
 
     def get_time(self, obj):
         return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
@@ -333,6 +424,13 @@ class PublicEventDetailSerializer(serializers.ModelSerializer):
 
 class EventListSerializer(serializers.ModelSerializer):
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
+    organizer_handle = serializers.SerializerMethodField()
+    organizerBio = serializers.SerializerMethodField()
+    organizerWebsite = serializers.SerializerMethodField()
+    organizerInstagram = serializers.SerializerMethodField()
     venue = serializers.CharField(source='venue_name', read_only=True)
     venueName = serializers.CharField(source='venue_name', read_only=True)
     time = serializers.SerializerMethodField()
@@ -367,7 +465,9 @@ class EventListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = (
-            'id', 'title', 'organizer', 'category', 'date', 'dateFormatted',
+            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo',
+            'organizerHandle', 'organizer_handle', 'organizerBio', 'organizerWebsite', 'organizerInstagram',
+            'category', 'date', 'dateFormatted',
             'time', 'start_time', 'startTime', 'end_time', 'endTime',
             'city', 'venue', 'venueName', 'venue_name', 'address', 'is_online',
             'startingPrice', 'spotsLeft', 'image', 'banner', 'banner_image',
@@ -400,13 +500,28 @@ class EventListSerializer(serializers.ModelSerializer):
         return resolve_image_url(obj.banner_image, self.context.get('request'))
 
     def get_organizer(self, obj):
-        try:
-            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
-                if obj.organizer.organizer_profile.organization_name:
-                    return obj.organizer.organizer_profile.organization_name
-        except Exception:
-            pass
-        return getattr(obj.organizer, 'full_name', '') or "Nexus Productions"
+        return extract_organizer_details(obj, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizer_handle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizerBio(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['bio']
+
+    def get_organizerWebsite(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['website']
+
+    def get_organizerInstagram(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['instagram']
 
     def get_time(self, obj):
         return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
@@ -503,6 +618,13 @@ class EventListSerializer(serializers.ModelSerializer):
 
 class EventDetailSerializer(serializers.ModelSerializer):
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
+    organizer_handle = serializers.SerializerMethodField()
+    organizerBio = serializers.SerializerMethodField()
+    organizerWebsite = serializers.SerializerMethodField()
+    organizerInstagram = serializers.SerializerMethodField()
     venue = serializers.CharField(source='venue_name', read_only=True)
     venueName = serializers.CharField(source='venue_name', read_only=True)
     time = serializers.SerializerMethodField()
@@ -537,7 +659,9 @@ class EventDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = (
-            'id', 'title', 'organizer', 'category', 'description', 'date', 'dateFormatted',
+            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo',
+            'organizerHandle', 'organizer_handle', 'organizerBio', 'organizerWebsite', 'organizerInstagram',
+            'category', 'description', 'date', 'dateFormatted',
             'start_time', 'end_time', 'startTime', 'endTime', 'time',
             'venue_name', 'venueName', 'venue', 'city', 'address',
             'is_online', 'status', 'isEnded', 'is_ended', 'is_featured', 'image', 'banner', 'banner_image',
@@ -570,13 +694,28 @@ class EventDetailSerializer(serializers.ModelSerializer):
         return resolve_image_url(obj.banner_image, self.context.get('request'))
 
     def get_organizer(self, obj):
-        try:
-            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
-                if obj.organizer.organizer_profile.organization_name:
-                    return obj.organizer.organizer_profile.organization_name
-        except Exception:
-            pass
-        return getattr(obj.organizer, 'full_name', '') or "Nexus Productions"
+        return extract_organizer_details(obj, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizer_handle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
+
+    def get_organizerBio(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['bio']
+
+    def get_organizerWebsite(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['website']
+
+    def get_organizerInstagram(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['instagram']
 
     def get_time(self, obj):
         return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
@@ -813,6 +952,19 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         end_time = attrs.get('end_time') if 'end_time' in attrs else getattr(self.instance, 'end_time', None)
         if start_time and end_time and end_time <= start_time:
             raise serializers.ValidationError({'endTime': 'End time must be later than start time.'})
+
+        title = attrs.get('title')
+        if title:
+            request = self.context.get('request')
+            organizer = getattr(request, 'user', None) if request else None
+            qs = Event.objects.filter(title__iexact=title.strip())
+            if organizer and organizer.is_authenticated:
+                qs = qs.filter(organizer=organizer)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({'title': 'An event with this title already exists in your studio.'})
+
         return attrs
 
     @transaction.atomic
@@ -1183,6 +1335,9 @@ class BulkAssignEventStaffSerializer(serializers.Serializer):
 
 class StaffAssignedEventSerializer(serializers.ModelSerializer):
     organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
     venue = serializers.CharField(source='venue_name', read_only=True)
     venueName = serializers.CharField(source='venue_name', read_only=True)
     time = serializers.SerializerMethodField()
@@ -1195,19 +1350,23 @@ class StaffAssignedEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = (
-            'id', 'title', 'organizer', 'category', 'date', 'dateFormatted',
+            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo', 'organizerHandle',
+            'category', 'date', 'dateFormatted',
             'time', 'venue', 'venueName', 'city', 'address', 'is_online',
             'image', 'status', 'permissions', 'totalAttendees', 'checkedInCount'
         )
 
     def get_organizer(self, obj):
-        try:
-            if hasattr(obj.organizer, 'organizer_profile') and obj.organizer.organizer_profile:
-                if obj.organizer.organizer_profile.organization_name:
-                    return obj.organizer.organizer_profile.organization_name
-        except Exception:
-            pass
-        return getattr(obj.organizer, 'full_name', '') or "Event Host"
+        return extract_organizer_details(obj, self.context.get('request'))['name']
+
+    def get_organizerLogo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizer_logo(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['logo']
+
+    def get_organizerHandle(self, obj):
+        return extract_organizer_details(obj, self.context.get('request'))['handle']
 
     def get_image(self, obj):
         return resolve_image_url(obj.banner_image, self.context.get('request'))

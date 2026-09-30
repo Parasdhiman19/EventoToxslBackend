@@ -14,6 +14,13 @@ from events.models import Event, TicketTier
 from .paypal import create_paypal_order, capture_paypal_order
 
 
+def _format_local_time(dt):
+    if not dt:
+        return None
+    local_dt = timezone.localtime(dt) if timezone.is_aware(dt) else dt
+    return local_dt.strftime('%I:%M %p')
+
+
 class CheckoutView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -238,14 +245,14 @@ class GateCheckInToggleView(views.APIView):
         if str(ticket_id).isdigit():
             ticket = AttendeeTicket.objects.filter(
                 Q(pk=int(ticket_id)) | Q(ticket_code=ticket_id)
-            ).select_related('event').first()
+            ).select_related('event', 'tier').first()
         else:
             ticket = AttendeeTicket.objects.filter(
                 ticket_code=ticket_id
-            ).select_related('event').first()
+            ).select_related('event', 'tier').first()
 
         if not ticket:
-            return Response({'detail': 'Ticket not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'Ticket not found in database.'}, status=status.HTTP_404_NOT_FOUND)
 
         # Check authorization: user must be event organizer OR assigned staff with can_check_in permission
         is_owner = (ticket.event.organizer_id == request.user.id)
@@ -257,16 +264,71 @@ class GateCheckInToggleView(views.APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        # Handle Scanner Mode (Admit Only & Duplicate Prevention)
+        mode = request.data.get('mode') if hasattr(request, 'data') and request.data else None
+        action = request.data.get('action') if hasattr(request, 'data') and request.data else None
+        
+        if mode == 'scan' or action == 'admit':
+            if ticket.is_checked_in:
+                formatted_time = _format_local_time(ticket.checked_in_at)
+                return Response({
+                    'id': ticket.ticket_code,
+                    'ticketCode': ticket.ticket_code,
+                    'checkedIn': True,
+                    'is_checked_in': True,
+                    'alreadyCheckedIn': True,
+                    'already_checked_in': True,
+                    'attendeeName': ticket.attendee_name,
+                    'attendeeEmail': ticket.attendee_email,
+                    'tier': ticket.tier.name if ticket.tier else 'General Admission',
+                    'seatOrGate': ticket.seat_or_gate,
+                    'checkInTime': formatted_time,
+                    'check_in_time': formatted_time,
+                    'eventTitle': ticket.event.title,
+                    'message': f"Already admitted at {formatted_time or 'earlier'}.",
+                }, status=status.HTTP_200_OK)
+            else:
+                ticket.is_checked_in = True
+                ticket.checked_in_at = timezone.now()
+                ticket.save()
+                formatted_time = _format_local_time(ticket.checked_in_at)
+                return Response({
+                    'id': ticket.ticket_code,
+                    'ticketCode': ticket.ticket_code,
+                    'checkedIn': True,
+                    'is_checked_in': True,
+                    'alreadyCheckedIn': False,
+                    'already_checked_in': False,
+                    'attendeeName': ticket.attendee_name,
+                    'attendeeEmail': ticket.attendee_email,
+                    'tier': ticket.tier.name if ticket.tier else 'General Admission',
+                    'seatOrGate': ticket.seat_or_gate,
+                    'checkInTime': formatted_time,
+                    'check_in_time': formatted_time,
+                    'eventTitle': ticket.event.title,
+                    'message': 'Guest admitted to venue successfully.',
+                }, status=status.HTTP_200_OK)
+
+        # Standard manual toggle behavior for table row actions
         ticket.is_checked_in = not ticket.is_checked_in
         ticket.checked_in_at = timezone.now() if ticket.is_checked_in else None
         ticket.save()
+        formatted_time = _format_local_time(ticket.checked_in_at)
 
         return Response({
             'id': ticket.ticket_code,
             'ticketCode': ticket.ticket_code,
             'checkedIn': ticket.is_checked_in,
             'is_checked_in': ticket.is_checked_in,
-            'checkInTime': ticket.checked_in_at.strftime('%I:%M %p') if ticket.checked_in_at else None,
+            'alreadyCheckedIn': False,
+            'already_checked_in': False,
+            'attendeeName': ticket.attendee_name,
+            'attendeeEmail': ticket.attendee_email,
+            'tier': ticket.tier.name if ticket.tier else 'General Admission',
+            'seatOrGate': ticket.seat_or_gate,
+            'checkInTime': formatted_time,
+            'check_in_time': formatted_time,
+            'eventTitle': ticket.event.title,
             'message': 'Attendee admitted to venue.' if ticket.is_checked_in else 'Gate admission revoked.',
         })
 
@@ -413,18 +475,70 @@ class StaffGateCheckInToggleView(views.APIView):
         if not ticket:
             return Response({'detail': 'Ticket code not found for this event.'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Handle Scanner Mode (Admit Only & Duplicate Prevention)
+        mode = request.data.get('mode') if hasattr(request, 'data') and request.data else None
+        action = request.data.get('action') if hasattr(request, 'data') and request.data else None
+        
+        if mode == 'scan' or action == 'admit':
+            if ticket.is_checked_in:
+                formatted_time = _format_local_time(ticket.checked_in_at)
+                return Response({
+                    'id': ticket.ticket_code,
+                    'ticketCode': ticket.ticket_code,
+                    'checkedIn': True,
+                    'is_checked_in': True,
+                    'alreadyCheckedIn': True,
+                    'already_checked_in': True,
+                    'attendeeName': ticket.attendee_name,
+                    'attendeeEmail': ticket.attendee_email,
+                    'tierName': ticket.tier.name if ticket.tier else 'General',
+                    'seatOrGate': ticket.seat_or_gate,
+                    'checkInTime': formatted_time,
+                    'check_in_time': formatted_time,
+                    'eventTitle': event.title,
+                    'message': f"Already admitted at {formatted_time or 'earlier'}.",
+                }, status=status.HTTP_200_OK)
+            else:
+                ticket.is_checked_in = True
+                ticket.checked_in_at = timezone.now()
+                ticket.save()
+                formatted_time = _format_local_time(ticket.checked_in_at)
+                return Response({
+                    'id': ticket.ticket_code,
+                    'ticketCode': ticket.ticket_code,
+                    'checkedIn': True,
+                    'is_checked_in': True,
+                    'alreadyCheckedIn': False,
+                    'already_checked_in': False,
+                    'attendeeName': ticket.attendee_name,
+                    'attendeeEmail': ticket.attendee_email,
+                    'tierName': ticket.tier.name if ticket.tier else 'General',
+                    'seatOrGate': ticket.seat_or_gate,
+                    'checkInTime': formatted_time,
+                    'check_in_time': formatted_time,
+                    'eventTitle': event.title,
+                    'message': f"{ticket.attendee_name} admitted successfully.",
+                }, status=status.HTTP_200_OK)
+
         ticket.is_checked_in = not ticket.is_checked_in
         ticket.checked_in_at = timezone.now() if ticket.is_checked_in else None
         ticket.save()
+        formatted_time = _format_local_time(ticket.checked_in_at)
 
         return Response({
             'id': ticket.ticket_code,
             'ticketCode': ticket.ticket_code,
             'checkedIn': ticket.is_checked_in,
             'is_checked_in': ticket.is_checked_in,
-            'checkInTime': ticket.checked_in_at.strftime('%I:%M %p') if ticket.checked_in_at else None,
+            'alreadyCheckedIn': False,
+            'already_checked_in': False,
             'attendeeName': ticket.attendee_name,
+            'attendeeEmail': ticket.attendee_email,
             'tierName': ticket.tier.name if ticket.tier else 'General',
+            'seatOrGate': ticket.seat_or_gate,
+            'checkInTime': formatted_time,
+            'check_in_time': formatted_time,
+            'eventTitle': event.title,
             'message': f"{ticket.attendee_name} admitted successfully." if ticket.is_checked_in else f"Check-in revoked for {ticket.attendee_name}.",
         })
 
@@ -642,6 +756,14 @@ class PayPalCaptureOrderView(views.APIView):
         if not paypal_id_to_capture:
             return Response({'detail': 'PayPal Order ID missing from transaction.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Check seat reservation hold for assigned seating events before capturing
+        if order.event.has_assigned_seating:
+            held_seats_count = Seat.objects.filter(order=order, status='reserved').count()
+            if held_seats_count < order.quantity:
+                return Response({
+                    'detail': 'Your seat reservation hold has expired or is no longer valid. Please select seats and try again.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
         # Execute PayPal capture
         try:
             capture_res = capture_paypal_order(paypal_id_to_capture)
@@ -666,10 +788,10 @@ class PayPalCaptureOrderView(views.APIView):
                     order.save(update_fields=['status', 'paypal_capture_id'])
 
                     # Finalize reserved seats if any
-                    reserved_seats = list(Seat.objects.select_for_update().filter(order=order))
                     tier_counts = {}
 
-                    if reserved_seats:
+                    if order.event.has_assigned_seating:
+                        reserved_seats = list(Seat.objects.select_for_update().filter(order=order))
                         for i, seat in enumerate(reserved_seats):
                             seat_tier = seat.tier or order.tier
                             ticket = AttendeeTicket.objects.create(
@@ -708,6 +830,30 @@ class PayPalCaptureOrderView(views.APIView):
                         t_obj.sold_count += cnt
                         t_obj.save()
 
+                # ── Notifications (outside atomic to avoid blocking) ──────────
+                try:
+                    from notifications.services import NotificationService
+                    buyer = order.user
+                    event = order.event
+                    first_ticket = order.tickets.first()
+
+                    NotificationService.send_order_placed(buyer, order)
+                    NotificationService.send_ticket_issued(buyer, order, first_ticket)
+
+                    organizer = getattr(event, 'organizer', None)
+                    if organizer:
+                        NotificationService.send_ticket_sold(organizer, order)
+                        total_capacity = sum(t.capacity for t in event.tiers.all())
+                        total_sold = sum(t.sold_count for t in event.tiers.all())
+                        remaining = total_capacity - total_sold
+                        if total_capacity > 0 and total_sold >= total_capacity:
+                            NotificationService.send_event_sold_out(organizer, event)
+                        elif total_capacity > 0 and remaining <= max(1, int(total_capacity * 0.10)):
+                            NotificationService.send_event_low_inventory(organizer, event, remaining)
+                except Exception as notif_exc:
+                    import logging
+                    logging.getLogger(__name__).warning(f'[PayPalCapture] Notification hook failed: {notif_exc}')
+
                 return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
 
             else:
@@ -721,6 +867,12 @@ class PayPalCaptureOrderView(views.APIView):
                         reserved_by=None,
                         order=None
                     )
+                # Notify buyer of failed payment
+                try:
+                    from notifications.services import NotificationService
+                    NotificationService.send_payment_failed(order.user, order)
+                except Exception:
+                    pass
                 return Response({'detail': f"Payment capture status: {capture_status}. Order was not completed."}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:

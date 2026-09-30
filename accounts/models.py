@@ -17,6 +17,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     email_notifications = models.BooleanField(default=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=CUSTOMER)
     is_active = models.BooleanField(default=True)
+    is_suspended = models.BooleanField(default=False)
+    suspension_reason = models.TextField(blank=True, default='')
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -47,8 +49,12 @@ class User(AbstractBaseUser, PermissionsMixin):
             pass
         return self.role == 'manager'
 
+    @property
+    def is_super_admin(self):
+        return bool(self.is_superuser or self.is_staff or self.role in ('admin', 'super_admin'))
+
     def __str__(self):
-        return f"{self.email} ({'organizer' if self.is_organizer else 'customer'})"
+        return f"{self.email} ({'admin' if self.is_super_admin else ('organizer' if self.is_organizer else 'customer')})"
 
 
 class OrganizerProfile(models.Model):

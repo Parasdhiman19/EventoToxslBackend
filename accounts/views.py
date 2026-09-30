@@ -238,6 +238,15 @@ class VerifySignupOTPView(views.APIView):
 
         tokens = get_tokens_for_user(user)
 
+        # Welcome notification
+        try:
+            from notifications.services import NotificationService
+            NotificationService.send_welcome(user)
+            if user.role == MANAGER:
+                NotificationService.send_organizer_profile_activated(user)
+        except Exception:
+            pass
+
         response = Response({
             'user': UserSerializer(user).data,
             'access': tokens['access'],
@@ -578,6 +587,13 @@ class ConfirmPasswordResetView(views.APIView):
         user.set_password(new_password)
         user.save(update_fields=['password'])
 
+        # Notify user that password was reset
+        try:
+            from notifications.services import NotificationService
+            NotificationService.send_password_changed(user)
+        except Exception:
+            pass
+
         return Response({
             'message': 'Your password has been reset successfully! You can now sign in with your new password.',
             'success': True
@@ -687,8 +703,15 @@ class BecomeOrganizerView(views.APIView):
         serializer = BecomeOrganizerSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save()
-            # Refetch/refresh user from db to ensure properties are fresh
             request.user.refresh_from_db()
+
+            # Notify user that organizer profile is now active
+            try:
+                from notifications.services import NotificationService
+                NotificationService.send_organizer_profile_activated(request.user)
+            except Exception:
+                pass
+
             return Response({
                 'user': UserSerializer(request.user).data,
                 'message': 'Organizer capability activated successfully.'
@@ -727,6 +750,14 @@ class ChangePasswordView(views.APIView):
         serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save()
+
+            # Notify user of password change
+            try:
+                from notifications.services import NotificationService
+                NotificationService.send_password_changed(request.user)
+            except Exception:
+                pass
+
             return Response({
                 'message': 'Password changed successfully.'
             }, status=status.HTTP_200_OK)

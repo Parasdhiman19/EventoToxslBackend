@@ -17,3 +17,17 @@ class IsOrganizer(BasePermission):
 
 # Backward compatibility alias
 IsManagerUser = IsOrganizer
+
+
+class IsSuperAdminUser(BasePermission):
+    """
+    Allows access only to authenticated Super Admin users (superuser, staff, or admin role).
+    """
+    message = "Super Admin credentials required to access this endpoint."
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            getattr(request.user, 'is_super_admin', False)
+        )

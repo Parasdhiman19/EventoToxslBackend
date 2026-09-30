@@ -68,6 +68,16 @@ urlpatterns = [
     # Handles organizer revenue overview, escrow calculations, PayPal payout method
     # management, and automated instant disbursements via PayPal Payouts REST API.
     path('api/payouts/', include('payouts.urls')),
+
+    # -------------------------------------------------------------------------
+    # 6. Notifications (/api/notifications/) -> notifications/urls.py
+    # -------------------------------------------------------------------------
+    path('api/notifications/', include('notifications.urls')),
+
+    # -------------------------------------------------------------------------
+    # 7. Super Admin Portal (/api/admin/) -> admin_panel/urls.py
+    # -------------------------------------------------------------------------
+    path('api/admin/', include('admin_panel.urls')),
 ]
 
 # Serve user-uploaded media files (event banners, avatars, seat maps) during development

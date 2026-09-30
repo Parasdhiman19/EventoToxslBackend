@@ -76,7 +76,7 @@ class ManagerOverviewView(views.APIView):
             Q(status='published') & (
                 Q(date__gt=current_date) |
                 Q(date=current_date, end_time__isnull=False, end_time__gt=current_time) |
-                Q(date=current_date, end_time__isnull=True, start_time__gte=current_time)
+                Q(date=current_date, end_time__isnull=True)
             )
         )
 
@@ -379,6 +379,16 @@ class RequestPayoutView(views.APIView):
             note="Evento Live Stage Revenue Settlement"
         )
 
+        if not paypal_res.get('success', False):
+            error_msg = paypal_res.get('error') or 'PayPal disbursement failed. Please verify your PayPal account and try again.'
+            # Notify organizer of failed payout
+            try:
+                from notifications.services import NotificationService
+                NotificationService.send_payout_failed(request.user, withdraw_amount, error_msg)
+            except Exception:
+                pass
+            return Response({'detail': error_msg}, status=status.HTTP_400_BAD_REQUEST)
+
         payout = Payout.objects.create(
             payout_number=temp_payout_number,
             organizer=request.user,
@@ -392,6 +402,13 @@ class RequestPayoutView(views.APIView):
             paypal_payout_item_id=paypal_res.get('payout_item_id', ''),
             status=paypal_res.get('status', 'Completed')
         )
+
+        # Notify organizer of successful disbursement
+        try:
+            from notifications.services import NotificationService
+            NotificationService.send_payout_disbursed(request.user, payout)
+        except Exception:
+            pass
 
         return Response({
             'message': f"Disbursement of ${withdraw_amount:,.2f} sent to PayPal ({paypal_email}) successfully.",

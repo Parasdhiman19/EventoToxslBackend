@@ -1,0 +1,52 @@
+# User Account & Security
+WELCOME = 'WELCOME'
+PASSWORD_CHANGED = 'PASSWORD_CHANGED'
+PASSWORD_RESET_REQUESTED = 'PASSWORD_RESET_REQUESTED'
+
+# User — Tickets & Orders
+ORDER_PLACED = 'ORDER_PLACED'
+TICKET_ISSUED = 'TICKET_ISSUED'
+PAYMENT_FAILED = 'PAYMENT_FAILED'
+
+# User — Events (Attendee)
+EVENT_UPDATED = 'EVENT_UPDATED'
+EVENT_CANCELLED = 'EVENT_CANCELLED'
+
+# User — Social
+EVENT_COMMENT_REPLIED = 'EVENT_COMMENT_REPLIED'
+
+# Manager — Sales
+TICKET_SOLD = 'TICKET_SOLD'
+EVENT_SOLD_OUT = 'EVENT_SOLD_OUT'
+EVENT_LOW_INVENTORY = 'EVENT_LOW_INVENTORY'
+
+# Manager — Events
+EVENT_PUBLISHED = 'EVENT_PUBLISHED'
+EVENT_COMMENT_RECEIVED = 'EVENT_COMMENT_RECEIVED'
+
+# Manager — Payouts
+PAYOUT_DISBURSED = 'PAYOUT_DISBURSED'
+PAYOUT_FAILED = 'PAYOUT_FAILED'
+
+# Manager — Account
+ORGANIZER_PROFILE_ACTIVATED = 'ORGANIZER_PROFILE_ACTIVATED'
+
+NOTIFICATION_TYPE_CHOICES = (
+    (WELCOME, 'Welcome to Evento'),
+    (PASSWORD_CHANGED, 'Password Changed'),
+    (PASSWORD_RESET_REQUESTED, 'Password Reset Requested'),
+    (ORDER_PLACED, 'Order Placed'),
+    (TICKET_ISSUED, 'Ticket Issued'),
+    (PAYMENT_FAILED, 'Payment Failed'),
+    (EVENT_UPDATED, 'Event Updated'),
+    (EVENT_CANCELLED, 'Event Cancelled'),
+    (EVENT_COMMENT_REPLIED, 'Comment Replied'),
+    (TICKET_SOLD, 'Ticket Sold'),
+    (EVENT_SOLD_OUT, 'Event Sold Out'),
+    (EVENT_LOW_INVENTORY, 'Low Ticket Inventory'),
+    (EVENT_PUBLISHED, 'Event Published'),
+    (EVENT_COMMENT_RECEIVED, 'New Event Comment'),
+    (PAYOUT_DISBURSED, 'Payout Disbursed'),
+    (PAYOUT_FAILED, 'Payout Failed'),
+    (ORGANIZER_PROFILE_ACTIVATED, 'Organizer Profile Activated'),
+)

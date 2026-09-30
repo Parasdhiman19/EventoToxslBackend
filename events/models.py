@@ -19,6 +19,8 @@ class Event(models.Model):
         ('published', 'Published'),
         ('draft', 'Draft'),
         ('past', 'Past / Archived'),
+        ('suspended', 'Suspended'),
+        ('cancelled', 'Cancelled'),
     )
 
     organizer = models.ForeignKey(
@@ -26,7 +28,7 @@ class Event(models.Model):
         on_delete=models.CASCADE,
         related_name='events'
     )
-    title = models.CharField(max_length=255, unique=True)
+    title = models.CharField(max_length=255)
     category = models.CharField(max_length=100, choices=CATEGORY_CHOICES, default='Music & Concerts')
     description = models.TextField(blank=True)
     banner_image = models.ImageField(upload_to='events/banners/', max_length=500, blank=True, null=True)
@@ -48,6 +50,15 @@ class Event(models.Model):
     require_attendee_phone = models.BooleanField(default=True)
     auto_refund_cancelled_events = models.BooleanField(default=True)
 
+    # Editorial & Admin Curation Fields
+    admin_notes = models.TextField(blank=True, default='')
+    banner_cta_text = models.CharField(blank=True, default='Book Passes', max_length=100)
+    banner_priority = models.IntegerField(db_index=True, default=0)
+    banner_tagline = models.CharField(blank=True, default='', max_length=255)
+    is_banner_hero = models.BooleanField(db_index=True, default=False)
+    is_recommended = models.BooleanField(db_index=True, default=False)
+    recommendation_badge = models.CharField(blank=True, default='', max_length=100)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -57,7 +68,8 @@ class Event(models.Model):
     @property
     def is_ended(self):
         """
-        Calculates whether this event has expired/ended based on date and end_time (or start_time).
+        Calculates whether this event has expired/ended based on date and end_time.
+        If end_time is not specified, the event remains active for the full day (until 23:59:59).
         Uses Django's timezone-aware current time.
         """
         if self.status == 'past':
@@ -65,7 +77,7 @@ class Event(models.Model):
         import datetime
         from django.utils import timezone
         now = timezone.localtime(timezone.now()) if timezone.is_aware(timezone.now()) else timezone.now()
-        event_time = self.end_time or self.start_time or datetime.time(23, 59, 59)
+        event_time = self.end_time or datetime.time(23, 59, 59)
         event_dt = datetime.datetime.combine(self.date, event_time)
         if timezone.is_aware(now):
             tz = timezone.get_current_timezone()
@@ -77,12 +89,14 @@ class Event(models.Model):
         """
         Returns the source-of-truth computed status:
         - 'draft' if manually marked draft
+        - 'suspended' if moderated / suspended
+        - 'cancelled' if event cancelled
         - 'past' if marked past or the event date & time has passed (Ended)
         - 'published' otherwise
         """
-        if self.status == 'draft':
-            return 'draft'
-        if self.status == 'past' or self.is_ended:
+        if self.status in ['draft', 'suspended', 'cancelled', 'past']:
+            return self.status
+        if self.is_ended:
             return 'past'
         return 'published'
 
@@ -301,4 +315,26 @@ class CommentLike(models.Model):
 
     def __str__(self):
         return f"{self.user.email} liked comment #{self.comment_id}"
+
+
+class PromotionalBanner(models.Model):
+    title = models.CharField(max_length=255)
+    subtitle = models.CharField(max_length=255, blank=True, default='')
+    tagline = models.CharField(max_length=100, blank=True, default='Featured Spotlight')
+    badge = models.CharField(max_length=100, blank=True, default='Spotlight')
+    event = models.ForeignKey(Event, on_delete=models.SET_NULL, null=True, blank=True, related_name='promotional_banners')
+    banner_image = models.ImageField(upload_to='banners/', max_length=500, blank=True, null=True)
+    image_url = models.CharField(max_length=500, blank=True, default='')
+    cta_text = models.CharField(max_length=50, default='Explore Event')
+    target_url = models.CharField(max_length=500, blank=True, default='')
+    display_order = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['display_order', '-created_at']
+
+    def __str__(self):
+        return f"{self.title} (Order: {self.display_order})"
 
