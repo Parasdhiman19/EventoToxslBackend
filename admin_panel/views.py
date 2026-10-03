@@ -445,7 +445,14 @@ class AdminEventListView(views.APIView):
     permission_classes = [IsSuperAdminUser]
 
     def get(self, request):
-        events = Event.objects.all().select_related('organizer').prefetch_related('tiers')
+        events = Event.objects.all().select_related(
+            'organizer',
+            'organizer__organizer_profile'
+        ).prefetch_related(
+            'tiers'
+        ).annotate(
+            annotated_checked_in=Count('attendees', filter=Q(attendees__is_checked_in=True))
+        )
 
         # Filters
         status_filter = request.query_params.get('status')
@@ -726,15 +733,15 @@ class AdminPayoutListView(views.APIView):
     permission_classes = [IsSuperAdminUser]
 
     def get(self, request):
-        from payouts.serializers import PayoutSerializer
-        payouts = Payout.objects.all().select_related('organizer')
+        from .serializers import AdminPayoutSerializer
+        payouts = Payout.objects.all().select_related('organizer', 'settlement_account')
 
         status_filter = request.query_params.get('status')
         if status_filter and status_filter != 'all':
             payouts = payouts.filter(status=status_filter)
 
-        payouts = payouts.order_by('-requested_at')
-        return Response(PayoutSerializer(payouts, many=True).data)
+        payouts = payouts.order_by('-created_at')
+        return Response(AdminPayoutSerializer(payouts, many=True).data)
 
 
 class AdminPayoutProcessView(views.APIView):
@@ -750,28 +757,28 @@ class AdminPayoutProcessView(views.APIView):
 
         if action == 'approve':
             payout.status = 'Completed'
-            payout.processed_at = timezone.now()
-            payout.notes = notes or 'Approved by Super Admin'
+            if notes:
+                payout.failure_reason = notes
             payout.save()
             log_admin_action(
                 request,
                 action_type="APPROVE_PAYOUT",
                 target_model="Payout",
                 target_id=payout.id,
-                description=f"Approved payout #{payout.payout_number} of ${float(payout.amount):,.2f} for {payout.organizer.email}."
+                description=f"Approved payout #{payout.payout_number} of ${float(payout.net_disbursed):,.2f} for {payout.organizer.email}."
             )
             return Response({'detail': 'Payout marked as Completed.', 'status': 'Completed'})
 
         elif action == 'reject':
             payout.status = 'Failed'
-            payout.notes = notes or 'Rejected by Super Admin'
+            payout.failure_reason = notes or 'Rejected by Super Admin'
             payout.save()
             log_admin_action(
                 request,
                 action_type="REJECT_PAYOUT",
                 target_model="Payout",
                 target_id=payout.id,
-                description=f"Rejected payout #{payout.payout_number} for {payout.organizer.email}. Reason: {notes}"
+                description=f"Rejected payout #{payout.payout_number} for {payout.organizer.email}. Reason: {payout.failure_reason}"
             )
             return Response({'detail': 'Payout marked as Failed/Rejected.', 'status': 'Failed'})
 

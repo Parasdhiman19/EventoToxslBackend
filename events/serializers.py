@@ -546,15 +546,23 @@ class EventListSerializer(serializers.ModelSerializer):
         return f"${min_price:,.2f}" if min_price > 0 else 'Free Entry'
 
     def get_spotsLeft(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            total_capacity = obj.seats.count()
+            total_sold = obj.seats.filter(status='booked').count()
+            return max(0, total_capacity - total_sold)
         tiers = obj.tiers.all()
         total_capacity = sum(t.capacity for t in tiers)
         total_sold = sum(t.sold_count for t in tiers)
         return max(0, total_capacity - total_sold)
 
     def get_ticketsSold(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.filter(status='booked').count()
         return sum(t.sold_count for t in obj.tiers.all())
 
     def get_totalCapacity(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.count()
         return sum(t.capacity for t in obj.tiers.all())
 
     def get_priceRange(self, obj):
@@ -737,15 +745,23 @@ class EventDetailSerializer(serializers.ModelSerializer):
         return f"${min_price:,.2f}"
 
     def get_spotsLeft(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            total_capacity = obj.seats.count()
+            total_sold = obj.seats.filter(status='booked').count()
+            return max(0, total_capacity - total_sold)
         tiers = obj.tiers.all()
         total_capacity = sum(t.capacity for t in tiers)
         total_sold = sum(t.sold_count for t in tiers)
         return max(0, total_capacity - total_sold)
 
     def get_ticketsSold(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.filter(status='booked').count()
         return sum(t.sold_count for t in obj.tiers.all())
 
     def get_totalCapacity(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.count()
         return sum(t.capacity for t in obj.tiers.all())
 
     def get_grossRevenue(self, obj):

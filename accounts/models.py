@@ -129,9 +129,7 @@ class SettlementAccount(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        if self.method_type == 'paypal':
-            return f"PayPal ({self.paypal_email}) - {self.organizer.email}"
-        return f"{self.bank_name} - {self.account_number} ({self.organizer.email})"
+        return f"PayPal ({self.paypal_email}) - {self.organizer.email}"
 
 
 class StudioStaffMember(models.Model):

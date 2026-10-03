@@ -521,16 +521,10 @@ class SettlementAccountSerializer(serializers.ModelSerializer):
         }
 
     def get_maskedAccount(self, obj):
-        if obj.method_type == 'paypal':
-            return obj.paypal_email
-        if obj.account_number:
-            return f"•••• {obj.account_number[-4:]}"
-        return ''
+        return obj.paypal_email or ''
 
     def get_displayTitle(self, obj):
-        if obj.method_type == 'paypal':
-            return f"PayPal ({obj.paypal_email})"
-        return f"{obj.bank_name or 'Bank'} ({self.get_maskedAccount(obj)})"
+        return f"PayPal ({obj.paypal_email})"
 
     def to_internal_value(self, data):
         if hasattr(data, 'dict'):
@@ -543,9 +537,6 @@ class SettlementAccountSerializer(serializers.ModelSerializer):
         mapping = {
             'methodType': 'method_type',
             'paypalEmail': 'paypal_email',
-            'bankName': 'bank_name',
-            'accountNumber': 'account_number',
-            'holderName': 'holder_name',
             'isPrimary': 'is_primary',
         }
         for camel, snake in mapping.items():
@@ -555,25 +546,14 @@ class SettlementAccountSerializer(serializers.ModelSerializer):
                     val = val[0]
                 data[snake] = val
 
-        if 'method_type' not in data:
-            if 'paypal_email' in data and data['paypal_email']:
-                data['method_type'] = 'paypal'
-            elif 'bank_name' in data or 'account_number' in data:
-                data['method_type'] = 'bank'
-
+        data['method_type'] = 'paypal'
         return super().to_internal_value(data)
 
     def validate(self, attrs):
-        method_type = attrs.get('method_type', 'paypal')
-        if method_type == 'paypal':
-            email = attrs.get('paypal_email', '').strip()
-            if not email:
-                raise serializers.ValidationError({'paypalEmail': 'Valid PayPal email address is required.'})
-        elif method_type == 'bank':
-            if not attrs.get('bank_name', '').strip():
-                raise serializers.ValidationError({'bankName': 'Bank name is required.'})
-            if not attrs.get('account_number', '').strip():
-                raise serializers.ValidationError({'accountNumber': 'Account number is required.'})
+        attrs['method_type'] = 'paypal'
+        email = (attrs.get('paypal_email') or '').strip()
+        if not email:
+            raise serializers.ValidationError({'paypalEmail': 'Valid PayPal email address is required.'})
         return attrs
 
 

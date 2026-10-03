@@ -217,7 +217,7 @@ class EventsTests(TestCase):
         self.event.refresh_from_db()
         self.assertEqual(self.event.status, 'past')
 
-    def test_manager_permanent_delete_event(self):
+    def test_manager_permanent_delete_disabled(self):
         login_res = self.client.post('/api/auth/login/', {
             'email': 'organizer@evento.com',
             'password': 'Password123!'
@@ -225,13 +225,12 @@ class EventsTests(TestCase):
         token = login_res.data['access']
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
 
-        # Create temporary event to permanently delete
         from events.models import Event
         temp_event = Event.objects.create(
             organizer=self.manager,
             title="Temporary Test Stage",
             category="Music & Concerts",
-            description="A stage created to test permanent deletion.",
+            description="A stage created to verify deletion rejection.",
             date="2026-12-31",
             start_time="20:00:00",
             venue_name="Temp Arena",
@@ -239,25 +238,9 @@ class EventsTests(TestCase):
             status="draft"
         )
         del_res = self.client.delete(f'/api/events/manager/{temp_event.id}/?permanent=true')
-        self.assertEqual(del_res.status_code, status.HTTP_200_OK)
-        self.assertTrue(del_res.data.get('deleted'))
-        self.assertFalse(Event.objects.filter(pk=temp_event.id).exists())
-
-    def test_manager_permanent_delete_blocked_with_ticket_sales(self):
-        login_res = self.client.post('/api/auth/login/', {
-            'email': 'organizer@evento.com',
-            'password': 'Password123!'
-        })
-        token = login_res.data['access']
-        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
-
-        # self.event has self.tier1 with sold_count=10
-        del_res = self.client.delete(f'/api/events/manager/{self.event.id}/?permanent=true')
         self.assertEqual(del_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(del_res.data.get('can_delete'))
-        self.assertTrue(del_res.data.get('has_sales'))
-        # Ensure event was not deleted
-        self.assertTrue(Event.objects.filter(pk=self.event.id).exists())
+        self.assertTrue(Event.objects.filter(pk=temp_event.id).exists())
 
     def test_cross_manager_isolation(self):
         login_res = self.client.post('/api/auth/login/', {

@@ -52,11 +52,9 @@ class PayoutSerializer(serializers.ModelSerializer):
     def get_method(self, obj):
         if obj.destination_summary:
             return obj.destination_summary
-        if obj.settlement_account:
-            if obj.settlement_account.method_type == 'paypal':
-                return f"PayPal ({obj.settlement_account.paypal_email})"
-            return f"{obj.settlement_account.bank_name} {obj.settlement_account.account_number}"
-        return "Direct Wire Settlement"
+        if obj.settlement_account and obj.settlement_account.paypal_email:
+            return f"PayPal ({obj.settlement_account.paypal_email})"
+        return "PayPal Direct Transfer"
 
     def get_destinationAccount(self, obj):
         return self.get_method(obj)

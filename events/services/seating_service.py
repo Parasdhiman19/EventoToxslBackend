@@ -1,7 +1,9 @@
 from decimal import Decimal
+from django.db import transaction
 from events.models import TicketTier, Seat
 
 
+@transaction.atomic
 def sync_seating_layout_to_db(event, seating_layout):
     """
     Parses seating_layout JSON and synchronizes TicketTier and Seat models.
@@ -18,13 +20,13 @@ def sync_seating_layout_to_db(event, seating_layout):
     tiers_config = seating_layout.get('tiers', [])
     grid = seating_layout.get('grid', [])
 
-    # Calculate capacity per tier from the grid
+    # Calculate capacity per tier from the grid (case-normalized)
     tier_counts = {}
     for seat_data in grid:
         if not seat_data or seat_data.get('status') == 'empty' or seat_data.get('isAisle') or seat_data.get('is_aisle'):
             continue
         tier_name = (seat_data.get('tierName') or seat_data.get('tier') or 'General Admission').strip()
-        tier_counts[tier_name] = tier_counts.get(tier_name, 0) + 1
+        tier_counts[tier_name.lower()] = tier_counts.get(tier_name.lower(), 0) + 1
 
     # Map or create TicketTiers
     existing_tiers = {t.name.lower(): t for t in event.tiers.all()}
@@ -38,7 +40,16 @@ def sync_seating_layout_to_db(event, seating_layout):
         except Exception:
             price = Decimal('0.00')
         desc = t_conf.get('description', '') or ''
-        cap = max(1, tier_counts.get(t_name, t_conf.get('capacity', 100)))
+        
+        # If grid has seats, tier capacity is strictly the count of matching seats in grid
+        if grid:
+            cap = tier_counts.get(t_name.lower(), 0)
+        else:
+            raw_cap = t_conf.get('capacity')
+            try:
+                cap = int(raw_cap) if raw_cap not in [None, ''] else 0
+            except Exception:
+                cap = 0
 
         if t_name.lower() in existing_tiers:
             tier_obj = existing_tiers[t_name.lower()]
@@ -57,30 +68,30 @@ def sync_seating_layout_to_db(event, seating_layout):
         tier_model_map[t_name.lower()] = tier_obj
 
     # Fallback: if no tiers_config defined but grid has seats
-    for t_name, count in tier_counts.items():
-        if t_name.lower() not in tier_model_map:
-            if t_name.lower() in existing_tiers:
-                tier_obj = existing_tiers[t_name.lower()]
+    for t_name_lower, count in tier_counts.items():
+        if t_name_lower not in tier_model_map:
+            if t_name_lower in existing_tiers:
+                tier_obj = existing_tiers[t_name_lower]
                 tier_obj.capacity = max(count, tier_obj.sold_count)
                 tier_obj.save()
             else:
                 tier_obj = TicketTier.objects.create(
                     event=event,
-                    name=t_name,
+                    name=t_name_lower.title(),
                     price=Decimal('35.00'),
                     capacity=count,
                     description='Standard Seating'
                 )
-            tier_model_map[t_name.lower()] = tier_obj
+            tier_model_map[t_name_lower] = tier_obj
 
     # Synchronize Seats
-    fallback_tier = event.tiers.first()
+    fallback_tier = next(iter(tier_model_map.values()), None) or event.tiers.first()
     if not fallback_tier:
         fallback_tier = TicketTier.objects.create(
             event=event,
             name='General Admission',
             price=Decimal('25.00'),
-            capacity=max(100, len(grid)),
+            capacity=len(grid) if grid else 100,
             description='Standard Admission'
         )
 
@@ -131,3 +142,13 @@ def sync_seating_layout_to_db(event, seating_layout):
     for key, seat_obj in existing_seats.items():
         if key not in active_seat_keys and seat_obj.status != 'booked':
             seat_obj.delete()
+
+    # Re-sync tier capacities with actual seat counts & clean up empty unused tiers
+    for t in list(event.tiers.all()):
+        seat_count = t.seats.count()
+        if grid:
+            if seat_count == 0 and t.sold_count == 0 and event.tiers.filter(seats__isnull=False).exists():
+                t.delete()
+            else:
+                t.capacity = max(seat_count, t.sold_count)
+                t.save(update_fields=['capacity'])

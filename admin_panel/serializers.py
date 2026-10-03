@@ -238,9 +238,13 @@ class AdminEventListSerializer(serializers.ModelSerializer):
         return prof.organization_name if prof else (obj.organizer.full_name or obj.organizer.email)
 
     def get_ticketsSold(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.filter(status='booked').count()
         return sum(t.sold_count for t in obj.tiers.all())
 
     def get_totalCapacity(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.count()
         return sum(t.capacity for t in obj.tiers.all())
 
     def get_grossRevenue(self, obj):
@@ -248,6 +252,8 @@ class AdminEventListSerializer(serializers.ModelSerializer):
         return f"${float(rev):,.2f}"
 
     def get_checkedInCount(self, obj):
+        if hasattr(obj, 'annotated_checked_in'):
+            return obj.annotated_checked_in
         return AttendeeTicket.objects.filter(event=obj, is_checked_in=True).count()
 
 
@@ -280,3 +286,34 @@ class AdminTransactionSerializer(serializers.ModelSerializer):
     def get_organizerName(self, obj):
         prof = getattr(obj.event.organizer, 'organizer_profile', None)
         return prof.organization_name if prof else (obj.event.organizer.full_name or obj.event.organizer.email)
+
+
+class AdminPayoutSerializer(serializers.ModelSerializer):
+    organizer_name = serializers.SerializerMethodField()
+    organizer_email = serializers.CharField(source='organizer.email', read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    destination_summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Payout
+        fields = (
+            'id', 'payout_number', 'organizer', 'organizer_name', 'organizer_email',
+            'settlement_account', 'method_type', 'destination_summary',
+            'gross_amount', 'fee_deducted', 'net_disbursed', 'paypal_batch_id',
+            'paypal_payout_item_id', 'utr_reference', 'status', 'failure_reason',
+            'created_at'
+        )
+
+    def get_organizer_name(self, obj):
+        if not obj.organizer:
+            return 'Unknown Organizer'
+        prof = getattr(obj.organizer, 'organizer_profile', None)
+        return prof.organization_name if (prof and prof.organization_name) else (obj.organizer.full_name or obj.organizer.email)
+
+    def get_destination_summary(self, obj):
+        if obj.destination_summary:
+            return obj.destination_summary
+        if obj.settlement_account and obj.settlement_account.paypal_email:
+            return f"PayPal ({obj.settlement_account.paypal_email})"
+        return "PayPal Direct Transfer"
+

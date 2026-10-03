@@ -267,25 +267,16 @@ class ManagerEventDetailView(views.APIView):
             return Response({'detail': 'Event not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
 
         action = request.query_params.get('action', '').lower()
-        permanent = request.query_params.get('permanent', '').lower() in ['true', '1'] or (action == 'delete')
+        permanent = request.query_params.get('permanent', '').lower() in ['true', '1'] or (action == 'delete') or (action == 'permanent')
 
         if permanent:
-            has_sales = event.orders.filter(status__in=['Confirmed', 'Paid', 'Completed', 'Refunded']).exists()
-            has_attendees = event.attendees.exists()
-            has_sold_tiers = event.tiers.filter(sold_count__gt=0).exists()
-
-            if has_sales or has_attendees or has_sold_tiers:
-                return Response(
-                    {
-                        'detail': 'Cannot permanently delete an event with confirmed ticket sales, attendee passports, or financial transactions. Please cancel or archive the event instead to preserve financial and attendee records.',
-                        'can_delete': False,
-                        'has_sales': True,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            event.delete()
-            return Response({'detail': 'Event permanently deleted successfully.', 'deleted': True})
+            return Response(
+                {
+                    'detail': 'Permanent deletion of events is disabled. You can archive or cancel this event instead to preserve records.',
+                    'can_delete': False,
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if action == 'cancel':
             event.status = 'cancelled'
@@ -630,7 +621,8 @@ class ManagerEventSeatingView(views.APIView):
         if not layout_data or not isinstance(layout_data, dict):
             return Response({'detail': 'Invalid seating layout payload.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        sync_seating_layout_to_db(event, layout_data)
+        with transaction.atomic():
+            sync_seating_layout_to_db(event, layout_data)
 
         seats = event.seats.all().select_related('tier')
         return Response({
