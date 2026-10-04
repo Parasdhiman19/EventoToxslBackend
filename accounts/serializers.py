@@ -615,7 +615,7 @@ class OrganizerProfileSerializer(serializers.ModelSerializer):
             elif isinstance(logo_val, str) and logo_val.startswith(('http://', 'https://')):
                 data['logo_url'] = logo_val
             elif hasattr(logo_val, 'read') or (isinstance(logo_val, str) and logo_val.startswith('data:image/')):
-                data['logo_url'] = save_organizer_logo(logo_val)
+                data['logo_url'] = upload_image_to_cloudinary(logo_val, folder='evento/organizers/logos')
 
         return super().to_internal_value(data)
 
