@@ -329,17 +329,25 @@ class CheckoutSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        from events.models import Seat
+        from events.models import Seat, TicketTier
 
         user = validated_data['user']
         event = validated_data['event_obj']
-        tier_id = validated_data['tier_obj'].id
-        seat_ids = validated_data.get('seat_ids') or []
+        tier_obj = validated_data.get('tier_obj')
+        if not tier_obj:
+            tier_obj = event.tiers.first()
+            if not tier_obj:
+                tier_obj, _ = TicketTier.objects.get_or_create(
+                    event=event,
+                    name='Assigned Seat Tier',
+                    defaults={'price': Decimal('0.00'), 'capacity': 100}
+                )
+        tier_id = tier_obj.id
 
         # Lock ticket tier row for update
         tier = TicketTier.objects.select_for_update().get(pk=tier_id)
 
-        payment_method = validated_data.get('paymentMethod') or validated_data.get('payment_method') or 'UPI • Axis Bank'
+        payment_method = validated_data.get('paymentMethod') or validated_data.get('payment_method') or 'Instant Confirmation Pass'
         attendee_name = (
             validated_data.get('attendeeName') or
             validated_data.get('attendee_name') or
@@ -353,9 +361,9 @@ class CheckoutSerializer(serializers.Serializer):
         )
 
         if seat_ids:
-            # Lock seats atomically to prevent race condition
+            # Lock seats atomically without outer join (PostgreSQL compliant)
             locked_seats = list(
-                Seat.objects.select_for_update().filter(id__in=seat_ids, event=event).select_related('tier')
+                Seat.objects.select_for_update().filter(id__in=seat_ids, event=event)
             )
             if len(locked_seats) != len(seat_ids):
                 raise serializers.ValidationError({"seatIds": "Selected seats could not be found."})

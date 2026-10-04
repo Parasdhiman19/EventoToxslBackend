@@ -558,9 +558,9 @@ class PayPalCreateOrderView(views.APIView):
 
         with transaction.atomic():
             if seat_ids:
-                # Lock rows to prevent simultaneous reservation
+                # Lock rows to prevent simultaneous reservation (PostgreSQL compliant)
                 locked_seats = list(
-                    Seat.objects.select_for_update().filter(id__in=seat_ids, event=event).select_related('tier')
+                    Seat.objects.select_for_update().filter(id__in=seat_ids, event=event)
                 )
                 if len(locked_seats) != len(seat_ids):
                     return Response({'detail': 'One or more selected seats could not be found.'}, status=status.HTTP_400_BAD_REQUEST)
