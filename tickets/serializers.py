@@ -333,6 +333,7 @@ class CheckoutSerializer(serializers.Serializer):
 
         user = validated_data['user']
         event = validated_data['event_obj']
+        seat_ids = validated_data.get('seat_ids') or []
         tier_obj = validated_data.get('tier_obj')
         if not tier_obj:
             tier_obj = event.tiers.first()
