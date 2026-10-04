@@ -316,25 +316,3 @@ class CommentLike(models.Model):
     def __str__(self):
         return f"{self.user.email} liked comment #{self.comment_id}"
 
-
-class PromotionalBanner(models.Model):
-    title = models.CharField(max_length=255)
-    subtitle = models.CharField(max_length=255, blank=True, default='')
-    tagline = models.CharField(max_length=100, blank=True, default='Featured Spotlight')
-    badge = models.CharField(max_length=100, blank=True, default='Spotlight')
-    event = models.ForeignKey(Event, on_delete=models.SET_NULL, null=True, blank=True, related_name='promotional_banners')
-    banner_image = models.ImageField(upload_to='banners/', max_length=500, blank=True, null=True)
-    image_url = models.CharField(max_length=500, blank=True, default='')
-    cta_text = models.CharField(max_length=50, default='Explore Event')
-    target_url = models.CharField(max_length=500, blank=True, default='')
-    display_order = models.IntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['display_order', '-created_at']
-
-    def __str__(self):
-        return f"{self.title} (Order: {self.display_order})"
-

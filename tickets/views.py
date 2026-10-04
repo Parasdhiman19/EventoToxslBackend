@@ -78,7 +78,7 @@ class ManagerTicketSalesView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def get(self, request):
-        manager_events = Event.objects.filter(organizer=request.user)
+        manager_events = Event.objects.filter(organizer=request.user).prefetch_related('tiers')
         events_list = [{'id': e.id, 'title': e.title} for e in manager_events]
 
         selected_events = manager_events
@@ -89,7 +89,7 @@ class ManagerTicketSalesView(views.APIView):
             else:
                 selected_events = manager_events.filter(title__icontains=event_filter)
 
-        orders = Order.objects.filter(event__in=selected_events)
+        orders = Order.objects.filter(event__in=selected_events).select_related('user', 'event', 'tier').prefetch_related('tickets')
 
         search = request.query_params.get('search')
         if search:
@@ -118,7 +118,7 @@ class ManagerTicketSalesView(views.APIView):
         success_rate = round((confirmed_count / (total_orders_attempted or 1)) * 100, 1)
 
         # Tier breakdown
-        tiers = TicketTier.objects.filter(event__in=selected_events)
+        tiers = TicketTier.objects.filter(event__in=selected_events).select_related('event')
         tier_breakdown = []
         for t in tiers:
             tier_status = (
@@ -161,7 +161,7 @@ class ManagerTicketSalesView(views.APIView):
         return Response({
             'metrics': metrics,
             'tierBreakdown': tier_breakdown,
-            'transactions': OrderSerializer(orders, many=True).data,
+            'transactions': OrderSerializer(orders, many=True, context={'request': request}).data,
             'events': events_list,
         })
 
@@ -235,6 +235,80 @@ class ManagerAttendeesView(views.APIView):
         })
 
 
+def process_gate_check_in(ticket, mode=None, action=None):
+    """
+    Unified gate admission check-in handler for managers and assigned staff.
+    Supports scanner mode (admit only with duplicate detection) and manual toggle mode.
+    """
+    tier_name = ticket.tier.name if ticket.tier else 'General Admission'
+    if mode == 'scan' or action == 'admit':
+        if ticket.is_checked_in:
+            formatted_time = _format_local_time(ticket.checked_in_at)
+            return {
+                'id': ticket.ticket_code,
+                'ticketCode': ticket.ticket_code,
+                'checkedIn': True,
+                'is_checked_in': True,
+                'alreadyCheckedIn': True,
+                'already_checked_in': True,
+                'attendeeName': ticket.attendee_name,
+                'attendeeEmail': ticket.attendee_email,
+                'tier': tier_name,
+                'tierName': tier_name,
+                'seatOrGate': ticket.seat_or_gate,
+                'checkInTime': formatted_time,
+                'check_in_time': formatted_time,
+                'eventTitle': ticket.event.title,
+                'message': f"Already admitted at {formatted_time or 'earlier'}.",
+            }, status.HTTP_200_OK
+        else:
+            ticket.is_checked_in = True
+            ticket.checked_in_at = timezone.now()
+            ticket.save(update_fields=['is_checked_in', 'checked_in_at'])
+            formatted_time = _format_local_time(ticket.checked_in_at)
+            return {
+                'id': ticket.ticket_code,
+                'ticketCode': ticket.ticket_code,
+                'checkedIn': True,
+                'is_checked_in': True,
+                'alreadyCheckedIn': False,
+                'already_checked_in': False,
+                'attendeeName': ticket.attendee_name,
+                'attendeeEmail': ticket.attendee_email,
+                'tier': tier_name,
+                'tierName': tier_name,
+                'seatOrGate': ticket.seat_or_gate,
+                'checkInTime': formatted_time,
+                'check_in_time': formatted_time,
+                'eventTitle': ticket.event.title,
+                'message': f"{ticket.attendee_name} admitted to venue successfully.",
+            }, status.HTTP_200_OK
+
+    # Standard manual toggle behavior
+    ticket.is_checked_in = not ticket.is_checked_in
+    ticket.checked_in_at = timezone.now() if ticket.is_checked_in else None
+    ticket.save(update_fields=['is_checked_in', 'checked_in_at'])
+    formatted_time = _format_local_time(ticket.checked_in_at)
+
+    return {
+        'id': ticket.ticket_code,
+        'ticketCode': ticket.ticket_code,
+        'checkedIn': ticket.is_checked_in,
+        'is_checked_in': ticket.is_checked_in,
+        'alreadyCheckedIn': False,
+        'already_checked_in': False,
+        'attendeeName': ticket.attendee_name,
+        'attendeeEmail': ticket.attendee_email,
+        'tier': tier_name,
+        'tierName': tier_name,
+        'seatOrGate': ticket.seat_or_gate,
+        'checkInTime': formatted_time,
+        'check_in_time': formatted_time,
+        'eventTitle': ticket.event.title,
+        'message': f"{ticket.attendee_name} admitted to venue." if ticket.is_checked_in else f"Gate admission revoked for {ticket.attendee_name}.",
+    }, status.HTTP_200_OK
+
+
 class GateCheckInToggleView(views.APIView):
     permission_classes = [IsManagerUser]
 
@@ -264,73 +338,11 @@ class GateCheckInToggleView(views.APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Handle Scanner Mode (Admit Only & Duplicate Prevention)
         mode = request.data.get('mode') if hasattr(request, 'data') and request.data else None
         action = request.data.get('action') if hasattr(request, 'data') and request.data else None
-        
-        if mode == 'scan' or action == 'admit':
-            if ticket.is_checked_in:
-                formatted_time = _format_local_time(ticket.checked_in_at)
-                return Response({
-                    'id': ticket.ticket_code,
-                    'ticketCode': ticket.ticket_code,
-                    'checkedIn': True,
-                    'is_checked_in': True,
-                    'alreadyCheckedIn': True,
-                    'already_checked_in': True,
-                    'attendeeName': ticket.attendee_name,
-                    'attendeeEmail': ticket.attendee_email,
-                    'tier': ticket.tier.name if ticket.tier else 'General Admission',
-                    'seatOrGate': ticket.seat_or_gate,
-                    'checkInTime': formatted_time,
-                    'check_in_time': formatted_time,
-                    'eventTitle': ticket.event.title,
-                    'message': f"Already admitted at {formatted_time or 'earlier'}.",
-                }, status=status.HTTP_200_OK)
-            else:
-                ticket.is_checked_in = True
-                ticket.checked_in_at = timezone.now()
-                ticket.save()
-                formatted_time = _format_local_time(ticket.checked_in_at)
-                return Response({
-                    'id': ticket.ticket_code,
-                    'ticketCode': ticket.ticket_code,
-                    'checkedIn': True,
-                    'is_checked_in': True,
-                    'alreadyCheckedIn': False,
-                    'already_checked_in': False,
-                    'attendeeName': ticket.attendee_name,
-                    'attendeeEmail': ticket.attendee_email,
-                    'tier': ticket.tier.name if ticket.tier else 'General Admission',
-                    'seatOrGate': ticket.seat_or_gate,
-                    'checkInTime': formatted_time,
-                    'check_in_time': formatted_time,
-                    'eventTitle': ticket.event.title,
-                    'message': 'Guest admitted to venue successfully.',
-                }, status=status.HTTP_200_OK)
 
-        # Standard manual toggle behavior for table row actions
-        ticket.is_checked_in = not ticket.is_checked_in
-        ticket.checked_in_at = timezone.now() if ticket.is_checked_in else None
-        ticket.save()
-        formatted_time = _format_local_time(ticket.checked_in_at)
-
-        return Response({
-            'id': ticket.ticket_code,
-            'ticketCode': ticket.ticket_code,
-            'checkedIn': ticket.is_checked_in,
-            'is_checked_in': ticket.is_checked_in,
-            'alreadyCheckedIn': False,
-            'already_checked_in': False,
-            'attendeeName': ticket.attendee_name,
-            'attendeeEmail': ticket.attendee_email,
-            'tier': ticket.tier.name if ticket.tier else 'General Admission',
-            'seatOrGate': ticket.seat_or_gate,
-            'checkInTime': formatted_time,
-            'check_in_time': formatted_time,
-            'eventTitle': ticket.event.title,
-            'message': 'Attendee admitted to venue.' if ticket.is_checked_in else 'Gate admission revoked.',
-        })
+        data, status_code = process_gate_check_in(ticket, mode=mode, action=action)
+        return Response(data, status=status_code)
 
     def patch(self, request, ticket_id):
         return self._toggle_ticket(request, ticket_id)
@@ -409,7 +421,7 @@ class StaffEventAttendeesView(views.APIView):
                 'totalPending': total_pending,
                 'checkInRate': check_in_rate,
             },
-            'attendees': AttendeeTicketSerializer(attendees, many=True).data,
+            'attendees': AttendeeTicketSerializer(attendees, many=True, context={'request': request}).data,
         })
 
     def patch(self, request, event_id, attendee_id):
@@ -438,7 +450,7 @@ class StaffEventAttendeesView(views.APIView):
             ticket.attendee_email = data.get('attendee_email', data.get('attendeeEmail'))
 
         ticket.save()
-        return Response(AttendeeTicketSerializer(ticket).data)
+        return Response(AttendeeTicketSerializer(ticket, context={'request': request}).data)
 
 
 class StaffGateCheckInToggleView(views.APIView):
@@ -465,82 +477,21 @@ class StaffGateCheckInToggleView(views.APIView):
             ticket = AttendeeTicket.objects.filter(
                 Q(pk=int(ticket_id)) | Q(ticket_code=ticket_id),
                 event=event
-            ).first()
+            ).select_related('event', 'tier').first()
         else:
             ticket = AttendeeTicket.objects.filter(
                 ticket_code=ticket_id,
                 event=event
-            ).first()
+            ).select_related('event', 'tier').first()
 
         if not ticket:
             return Response({'detail': 'Ticket code not found for this event.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Handle Scanner Mode (Admit Only & Duplicate Prevention)
         mode = request.data.get('mode') if hasattr(request, 'data') and request.data else None
         action = request.data.get('action') if hasattr(request, 'data') and request.data else None
-        
-        if mode == 'scan' or action == 'admit':
-            if ticket.is_checked_in:
-                formatted_time = _format_local_time(ticket.checked_in_at)
-                return Response({
-                    'id': ticket.ticket_code,
-                    'ticketCode': ticket.ticket_code,
-                    'checkedIn': True,
-                    'is_checked_in': True,
-                    'alreadyCheckedIn': True,
-                    'already_checked_in': True,
-                    'attendeeName': ticket.attendee_name,
-                    'attendeeEmail': ticket.attendee_email,
-                    'tierName': ticket.tier.name if ticket.tier else 'General',
-                    'seatOrGate': ticket.seat_or_gate,
-                    'checkInTime': formatted_time,
-                    'check_in_time': formatted_time,
-                    'eventTitle': event.title,
-                    'message': f"Already admitted at {formatted_time or 'earlier'}.",
-                }, status=status.HTTP_200_OK)
-            else:
-                ticket.is_checked_in = True
-                ticket.checked_in_at = timezone.now()
-                ticket.save()
-                formatted_time = _format_local_time(ticket.checked_in_at)
-                return Response({
-                    'id': ticket.ticket_code,
-                    'ticketCode': ticket.ticket_code,
-                    'checkedIn': True,
-                    'is_checked_in': True,
-                    'alreadyCheckedIn': False,
-                    'already_checked_in': False,
-                    'attendeeName': ticket.attendee_name,
-                    'attendeeEmail': ticket.attendee_email,
-                    'tierName': ticket.tier.name if ticket.tier else 'General',
-                    'seatOrGate': ticket.seat_or_gate,
-                    'checkInTime': formatted_time,
-                    'check_in_time': formatted_time,
-                    'eventTitle': event.title,
-                    'message': f"{ticket.attendee_name} admitted successfully.",
-                }, status=status.HTTP_200_OK)
 
-        ticket.is_checked_in = not ticket.is_checked_in
-        ticket.checked_in_at = timezone.now() if ticket.is_checked_in else None
-        ticket.save()
-        formatted_time = _format_local_time(ticket.checked_in_at)
-
-        return Response({
-            'id': ticket.ticket_code,
-            'ticketCode': ticket.ticket_code,
-            'checkedIn': ticket.is_checked_in,
-            'is_checked_in': ticket.is_checked_in,
-            'alreadyCheckedIn': False,
-            'already_checked_in': False,
-            'attendeeName': ticket.attendee_name,
-            'attendeeEmail': ticket.attendee_email,
-            'tierName': ticket.tier.name if ticket.tier else 'General',
-            'seatOrGate': ticket.seat_or_gate,
-            'checkInTime': formatted_time,
-            'check_in_time': formatted_time,
-            'eventTitle': event.title,
-            'message': f"{ticket.attendee_name} admitted successfully." if ticket.is_checked_in else f"Check-in revoked for {ticket.attendee_name}.",
-        })
+        data, status_code = process_gate_check_in(ticket, mode=mode, action=action)
+        return Response(data, status=status_code)
 
     def patch(self, request, event_id, ticket_id):
         return self._toggle_ticket(request, event_id, ticket_id)

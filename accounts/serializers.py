@@ -2,6 +2,9 @@ from rest_framework import serializers
 from django.contrib.auth import authenticate
 from .models import User, OrganizerProfile, SettlementAccount, StudioStaffMember, EmailVerificationOTP, PasswordResetToken
 from .constants import USER, MANAGER
+from events.models import Event, EventStaff, SavedEvent
+from tickets.models import AttendeeTicket, Order
+from events.utils.media_utils import upload_image_to_cloudinary
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -118,21 +121,18 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_ticketsCount(self, obj):
         try:
-            from tickets.models import AttendeeTicket
             return AttendeeTicket.objects.filter(order__user=obj).count()
         except Exception:
             return 0
 
     def get_ordersCount(self, obj):
         try:
-            from tickets.models import Order
             return Order.objects.filter(user=obj).count()
         except Exception:
             return 0
 
     def get_savedCount(self, obj):
         try:
-            from events.models import SavedEvent
             return SavedEvent.objects.filter(user=obj).count()
         except Exception:
             return 0
@@ -215,7 +215,6 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
             if avatar_val == '':
                 instance.avatar_url = ''
             elif hasattr(avatar_val, 'read') or (isinstance(avatar_val, str) and (avatar_val.startswith('data:image/') or avatar_val.startswith(('http://', 'https://')))):
-                from events.utils.media_utils import upload_image_to_cloudinary
                 if hasattr(avatar_val, 'read') or avatar_val.startswith('data:image/'):
                     uploaded_url = upload_image_to_cloudinary(avatar_val, folder='evento/users/avatars')
                     instance.avatar_url = uploaded_url
@@ -476,19 +475,6 @@ class LoginSerializer(serializers.Serializer):
         return attrs
 
 
-from events.utils.media_utils import upload_image_to_cloudinary
-
-
-def save_organizer_logo(data_uri_or_file, folder='evento/organizers/logos'):
-    """
-    Uploads organizer studio logo directly to Cloudinary and returns secure CDN URL.
-    """
-    if not data_uri_or_file:
-        return ''
-    return upload_image_to_cloudinary(data_uri_or_file, folder=folder)
-
-
-
 class SettlementAccountSerializer(serializers.ModelSerializer):
     methodType = serializers.CharField(source='method_type', read_only=True)
     paypalEmail = serializers.EmailField(source='paypal_email', read_only=True)
@@ -694,11 +680,9 @@ class StudioStaffMemberSerializer(serializers.ModelSerializer):
         return initials or 'ST'
 
     def get_assignedEventsCount(self, obj):
-        from events.models import EventStaff
         return EventStaff.objects.filter(event__organizer=obj.organizer, user=obj.user).count()
 
     def get_assignedEvents(self, obj):
-        from events.models import EventStaff
         staff_records = EventStaff.objects.filter(
             event__organizer=obj.organizer,
             user=obj.user
@@ -796,7 +780,6 @@ class AddStudioStaffMemberSerializer(serializers.Serializer):
 
         assign_event_id = validated_data.get('assignToEventId')
         if assign_event_id:
-            from events.models import Event, EventStaff
             event = Event.objects.filter(pk=assign_event_id, organizer=organizer).first()
             if event:
                 EventStaff.objects.update_or_create(

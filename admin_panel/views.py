@@ -455,9 +455,15 @@ class AdminEventListView(views.APIView):
         )
 
         # Filters
-        status_filter = request.query_params.get('status')
+        status_filter = request.query_params.get('status', 'all').lower()
+        today = timezone.now().date()
         if status_filter and status_filter != 'all':
-            events = events.filter(status=status_filter)
+            if status_filter in ['active', 'live', 'upcoming']:
+                events = events.filter(status='published', date__gte=today)
+            elif status_filter == 'past':
+                events = events.filter(Q(status='past') | Q(status='published', date__lt=today))
+            else:
+                events = events.filter(status=status_filter)
 
         category_filter = request.query_params.get('category')
         if category_filter and category_filter != 'all':
@@ -865,6 +871,26 @@ class AdminPlatformReportDetailView(views.APIView):
             description=f"Marked report #{report.id} as '{report.status}'."
         )
 
+        if report.reporter:
+            try:
+                from notifications.models import Notification
+                from notifications.constants import SUPPORT_TICKET_UPDATED
+                notes_snippet = f": {report.resolution_notes}" if report.resolution_notes else "."
+                Notification.objects.create(
+                    recipient=report.reporter,
+                    actor=request.user,
+                    notification_type=SUPPORT_TICKET_UPDATED,
+                    title=f"Support Ticket #{report.id} Status: {report.status}",
+                    message=f"Your ticket regarding '{report.reason}' has been updated to {report.status}{notes_snippet}",
+                    data={
+                        'reportId': report.id,
+                        'status': report.status,
+                        'resolutionNotes': report.resolution_notes,
+                    }
+                )
+            except Exception as notify_err:
+                pass
+
         return Response(PlatformReportSerializer(report).data)
 
 
@@ -943,14 +969,14 @@ class PublicHomepageContentView(views.APIView):
     def get(self, request):
         now = timezone.now()
 
-        # 1. Active Banners
+        # 1. Active Banners (capped to top 7 for optimal carousel performance)
         banners = HomepageBanner.objects.filter(
             is_active=True
         ).filter(
             Q(active_from__isnull=True) | Q(active_from__lte=now)
         ).filter(
             Q(active_until__isnull=True) | Q(active_until__gte=now)
-        ).order_by('display_order', '-created_at').select_related('event')
+        ).order_by('display_order', '-created_at').select_related('event')[:7]
 
         # 2. Active Recommended Events
         recommended_entries = RecommendedEvent.objects.filter(

@@ -24,7 +24,7 @@ def calculate_organizer_financials(user):
     - disbursed_total: Total amount already withdrawn via completed payouts
     - available_balance: Remaining cleared funds available for immediate withdrawal
     """
-    user_events = Event.objects.filter(organizer=user)
+    user_events = Event.objects.filter(organizer=user).prefetch_related('tiers')
     confirmed_orders = Order.objects.filter(
         event__in=user_events,
         status__in=['Confirmed', 'Paid', 'Completed']
@@ -89,7 +89,7 @@ class ManagerOverviewView(views.APIView):
         from django.utils import timezone
         from django.db.models import Q
 
-        user_events = Event.objects.filter(organizer=request.user)
+        user_events = Event.objects.filter(organizer=request.user).prefetch_related('tiers')
 
         now = timezone.localtime(timezone.now()) if timezone.is_aware(timezone.now()) else timezone.now()
         current_date = now.date()
@@ -167,7 +167,7 @@ class ManagerOverviewView(views.APIView):
             })
 
         # Recent transactions preview
-        recent_orders = Order.objects.filter(event__in=user_events).order_by('-created_at')[:6]
+        recent_orders = Order.objects.filter(event__in=user_events).select_related('user', 'event', 'tier').order_by('-created_at')[:6]
         recent_transactions = []
         for o in recent_orders:
             recent_transactions.append({
@@ -344,8 +344,11 @@ class RequestPayoutView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def post(self, request):
-        financials = calculate_organizer_financials(request.user)
-        available = financials['available_balance']
+        import uuid
+        from django.db import transaction
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
 
         # 1. Require at least one verified PayPal payout method
         payout_methods = SettlementAccount.objects.filter(organizer=request.user)
@@ -354,43 +357,7 @@ class RequestPayoutView(views.APIView):
                 'detail': 'Please connect a PayPal account before requesting a withdrawal.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 2. Check available funds
-        if available <= 0:
-            pending_escrow = financials.get('pending_escrow', Decimal('0.00'))
-            if pending_escrow > 0:
-                return Response({
-                    'detail': f"Funds from active stages (${pending_escrow:,.2f}) are currently held in Escrow Reserves. Funds clear into your withdrawable balance once each stage concludes."
-                }, status=status.HTTP_400_BAD_REQUEST)
-            return Response({
-                'detail': 'No cleared funds currently available for disbursement.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        # 3. Minimum withdrawal threshold ($10.00)
-        min_threshold = Decimal('10.00')
-        if available < min_threshold:
-            return Response({
-                'detail': f"Minimum withdrawal threshold is ${min_threshold:,.2f}. Current available balance is ${available:,.2f}."
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        # 4. Parse requested withdrawal amount (or default to 100% available)
-        raw_amount = request.data.get('amount')
-        if raw_amount is not None:
-            try:
-                requested_amount = Decimal(str(raw_amount)).quantize(Decimal('0.01'))
-            except Exception:
-                return Response({'detail': 'Invalid withdrawal amount specified.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            if requested_amount <= Decimal('0.00'):
-                return Response({'detail': 'Withdrawal amount must be greater than $0.00.'}, status=status.HTTP_400_BAD_REQUEST)
-            if requested_amount < min_threshold:
-                return Response({'detail': f'Minimum withdrawal amount is ${min_threshold:,.2f}.'}, status=status.HTTP_400_BAD_REQUEST)
-            if requested_amount > available:
-                return Response({'detail': f'Requested amount (${requested_amount:,.2f}) exceeds available balance (${available:,.2f}).'}, status=status.HTTP_400_BAD_REQUEST)
-            withdraw_amount = requested_amount
-        else:
-            withdraw_amount = available
-
-        # 5. Selected payout method
+        # Parse requested payout method
         method_id = request.data.get('methodId') or request.data.get('method_id') or request.data.get('payoutMethodId')
         target_method = None
         if method_id:
@@ -402,11 +369,64 @@ class RequestPayoutView(views.APIView):
         if not paypal_email:
             return Response({'detail': 'Please specify a valid PayPal account email address.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Generate temporary payout number for tracking
-        import uuid
-        temp_payout_number = f"PO-{uuid.uuid4().hex[:5].upper()}"
+        min_threshold = Decimal('10.00')
+        raw_amount = request.data.get('amount')
 
-        # 6. Execute instant disbursement via PayPal Payouts REST API
+        # 2. Atomically lock user record, validate balance, and create a 'Processing' Payout reservation
+        with transaction.atomic():
+            # Lock the user row to serialize concurrent payout requests from the same organizer
+            User.objects.select_for_update().get(pk=request.user.pk)
+
+            financials = calculate_organizer_financials(request.user)
+            available = financials['available_balance']
+
+            if available <= 0:
+                pending_escrow = financials.get('pending_escrow', Decimal('0.00'))
+                if pending_escrow > 0:
+                    return Response({
+                        'detail': f"Funds from active stages (${pending_escrow:,.2f}) are currently held in Escrow Reserves. Funds clear into your withdrawable balance once each stage concludes."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                return Response({
+                    'detail': 'No cleared funds currently available for disbursement.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if available < min_threshold:
+                return Response({
+                    'detail': f"Minimum withdrawal threshold is ${min_threshold:,.2f}. Current available balance is ${available:,.2f}."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if raw_amount is not None:
+                try:
+                    requested_amount = Decimal(str(raw_amount)).quantize(Decimal('0.01'))
+                except Exception:
+                    return Response({'detail': 'Invalid withdrawal amount specified.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                if requested_amount <= Decimal('0.00'):
+                    return Response({'detail': 'Withdrawal amount must be greater than $0.00.'}, status=status.HTTP_400_BAD_REQUEST)
+                if requested_amount < min_threshold:
+                    return Response({'detail': f'Minimum withdrawal amount is ${min_threshold:,.2f}.'}, status=status.HTTP_400_BAD_REQUEST)
+                if requested_amount > available:
+                    return Response({'detail': f'Requested amount (${requested_amount:,.2f}) exceeds available balance (${available:,.2f}).'}, status=status.HTTP_400_BAD_REQUEST)
+                withdraw_amount = requested_amount
+            else:
+                withdraw_amount = available
+
+            temp_payout_number = f"PO-{uuid.uuid4().hex[:5].upper()}"
+
+            # Create Payout record in 'Processing' state — this instantly reserves the funds from available balance
+            payout = Payout.objects.create(
+                payout_number=temp_payout_number,
+                organizer=request.user,
+                settlement_account=target_method,
+                method_type='paypal',
+                destination_summary=f"PayPal ({paypal_email})",
+                gross_amount=withdraw_amount,
+                fee_deducted=Decimal('0.00'),
+                net_disbursed=withdraw_amount,
+                status='Processing'
+            )
+
+        # 3. Outside the atomic lock, execute payout via PayPal Payouts REST API
         paypal_res = send_paypal_payout(
             payout_number=temp_payout_number,
             recipient_email=paypal_email,
@@ -417,6 +437,11 @@ class RequestPayoutView(views.APIView):
 
         if not paypal_res.get('success', False):
             error_msg = paypal_res.get('error') or 'PayPal disbursement failed. Please verify your PayPal account and try again.'
+            # Mark payout as Failed so the reserved funds are restored to available balance
+            payout.status = 'Failed'
+            payout.failure_reason = error_msg
+            payout.save(update_fields=['status', 'failure_reason'])
+
             # Notify organizer of failed payout
             try:
                 from notifications.services import NotificationService
@@ -425,19 +450,11 @@ class RequestPayoutView(views.APIView):
                 pass
             return Response({'detail': error_msg}, status=status.HTTP_400_BAD_REQUEST)
 
-        payout = Payout.objects.create(
-            payout_number=temp_payout_number,
-            organizer=request.user,
-            settlement_account=target_method,
-            method_type='paypal',
-            destination_summary=f"PayPal ({paypal_email})",
-            gross_amount=withdraw_amount,
-            fee_deducted=Decimal('0.00'),
-            net_disbursed=withdraw_amount,
-            paypal_batch_id=paypal_res.get('batch_id', ''),
-            paypal_payout_item_id=paypal_res.get('payout_item_id', ''),
-            status=paypal_res.get('status', 'Completed')
-        )
+        # 4. Mark Payout as Completed with PayPal batch details
+        payout.status = paypal_res.get('status', 'Completed')
+        payout.paypal_batch_id = paypal_res.get('batch_id', '')
+        payout.paypal_payout_item_id = paypal_res.get('payout_item_id', '')
+        payout.save(update_fields=['status', 'paypal_batch_id', 'paypal_payout_item_id'])
 
         # Notify organizer of successful disbursement
         try:
@@ -446,10 +463,12 @@ class RequestPayoutView(views.APIView):
         except Exception:
             pass
 
+        remaining_balance = float(max(Decimal('0.00'), available - withdraw_amount))
+
         return Response({
             'message': f"Disbursement of ${withdraw_amount:,.2f} sent to PayPal ({paypal_email}) successfully.",
             'payout': PayoutSerializer(payout).data,
-            'availableBalance': float(max(Decimal('0.00'), available - withdraw_amount)),
+            'availableBalance': remaining_balance,
         }, status=status.HTTP_201_CREATED)
 
 

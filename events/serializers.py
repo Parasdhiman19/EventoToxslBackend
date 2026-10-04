@@ -137,54 +137,11 @@ def extract_organizer_details(obj, request=None):
     }
 
 
-class PublicEventListSerializer(serializers.ModelSerializer):
+class BaseEventSerializerMixin:
     """
-    Public discovery event serializer.
-    Excludes sensitive financial metrics (grossRevenue, ticketsSold, totalCapacity, staff permissions).
+    Shared serializer method helpers for event serialization across public and manager endpoints.
+    Eliminates duplicated property resolution for organizers, images, timestamps, and interaction stats.
     """
-    organizer = serializers.SerializerMethodField()
-    organizerLogo = serializers.SerializerMethodField()
-    organizer_logo = serializers.SerializerMethodField()
-    organizerHandle = serializers.SerializerMethodField()
-    organizer_handle = serializers.SerializerMethodField()
-    organizerBio = serializers.SerializerMethodField()
-    organizerWebsite = serializers.SerializerMethodField()
-    organizerInstagram = serializers.SerializerMethodField()
-    venue = serializers.CharField(source='venue_name', read_only=True)
-    venueName = serializers.CharField(source='venue_name', read_only=True)
-    time = serializers.SerializerMethodField()
-    date = serializers.SerializerMethodField()
-    dateFormatted = serializers.SerializerMethodField()
-    startTime = serializers.SerializerMethodField()
-    endTime = serializers.SerializerMethodField()
-    startingPrice = serializers.SerializerMethodField()
-    priceRange = serializers.SerializerMethodField()
-    image = serializers.SerializerMethodField()
-    banner = serializers.SerializerMethodField()
-    banner_image = serializers.SerializerMethodField()
-    isBookmarked = serializers.SerializerMethodField()
-    likesCount = serializers.SerializerMethodField()
-    isLiked = serializers.SerializerMethodField()
-    commentsCount = serializers.SerializerMethodField()
-    status = serializers.SerializerMethodField()
-    isEnded = serializers.SerializerMethodField()
-    is_ended = serializers.SerializerMethodField()
-    hasAssignedSeating = serializers.BooleanField(source='has_assigned_seating', read_only=True)
-
-    class Meta:
-        model = Event
-        fields = (
-            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo',
-            'organizerHandle', 'organizer_handle', 'organizerBio', 'organizerWebsite', 'organizerInstagram',
-            'category', 'date', 'dateFormatted',
-            'time', 'start_time', 'startTime', 'end_time', 'endTime',
-            'city', 'venue', 'venueName', 'venue_name', 'address', 'is_online',
-            'startingPrice', 'priceRange', 'image', 'banner', 'banner_image',
-            'status', 'isEnded', 'is_ended', 'is_featured', 'isBookmarked',
-            'likesCount', 'isLiked', 'commentsCount',
-            'has_assigned_seating', 'hasAssignedSeating'
-        )
-
     def get_status(self, obj):
         return obj.computed_status
 
@@ -278,7 +235,112 @@ class PublicEventListSerializer(serializers.ModelSerializer):
         return obj.comments.filter(is_deleted=False).count()
 
 
-class PublicEventDetailSerializer(serializers.ModelSerializer):
+class ManagerEventSerializerMixin(BaseEventSerializerMixin):
+    """
+    Shared serializer method helpers for manager-level event serialization.
+    Adds capacity, sales, spots left, revenue calculations, and staff role/permissions resolution.
+    """
+    def get_spotsLeft(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            total_capacity = obj.seats.count()
+            total_sold = obj.seats.filter(status='booked').count()
+            return max(0, total_capacity - total_sold)
+        tiers = obj.tiers.all()
+        total_capacity = sum(t.capacity for t in tiers)
+        total_sold = sum(t.sold_count for t in tiers)
+        return max(0, total_capacity - total_sold)
+
+    def get_ticketsSold(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.filter(status='booked').count()
+        return sum(t.sold_count for t in obj.tiers.all())
+
+    def get_totalCapacity(self, obj):
+        if obj.has_assigned_seating and obj.seats.exists():
+            return obj.seats.count()
+        return sum(t.capacity for t in obj.tiers.all())
+
+    def get_grossRevenue(self, obj):
+        tiers = obj.tiers.all()
+        total = sum(t.price * t.sold_count for t in tiers)
+        return f"${total:,.2f}"
+
+    def get_userRole(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            if obj.organizer_id == request.user.id:
+                return 'owner'
+            from .models import EventStaff
+            if EventStaff.objects.filter(event=obj, user=request.user).exists():
+                return 'staff'
+        return 'attendee'
+
+    def get_staffPermissions(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            if obj.organizer_id == request.user.id:
+                return {'can_view_attendees': True, 'can_check_in': True, 'can_edit_attendees': True}
+            from .models import EventStaff
+            staff = EventStaff.objects.filter(event=obj, user=request.user).first()
+            if staff:
+                return {
+                    'can_view_attendees': staff.can_view_attendees,
+                    'can_check_in': staff.can_check_in,
+                    'can_edit_attendees': staff.can_edit_attendees,
+                }
+        return None
+
+
+class PublicEventListSerializer(BaseEventSerializerMixin, serializers.ModelSerializer):
+    """
+    Public discovery event serializer.
+    Excludes sensitive financial metrics (grossRevenue, ticketsSold, totalCapacity, staff permissions).
+    """
+    organizer = serializers.SerializerMethodField()
+    organizerLogo = serializers.SerializerMethodField()
+    organizer_logo = serializers.SerializerMethodField()
+    organizerHandle = serializers.SerializerMethodField()
+    organizer_handle = serializers.SerializerMethodField()
+    organizerBio = serializers.SerializerMethodField()
+    organizerWebsite = serializers.SerializerMethodField()
+    organizerInstagram = serializers.SerializerMethodField()
+    venue = serializers.CharField(source='venue_name', read_only=True)
+    venueName = serializers.CharField(source='venue_name', read_only=True)
+    time = serializers.SerializerMethodField()
+    date = serializers.SerializerMethodField()
+    dateFormatted = serializers.SerializerMethodField()
+    startTime = serializers.SerializerMethodField()
+    endTime = serializers.SerializerMethodField()
+    startingPrice = serializers.SerializerMethodField()
+    priceRange = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+    banner = serializers.SerializerMethodField()
+    banner_image = serializers.SerializerMethodField()
+    isBookmarked = serializers.SerializerMethodField()
+    likesCount = serializers.SerializerMethodField()
+    isLiked = serializers.SerializerMethodField()
+    commentsCount = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    isEnded = serializers.SerializerMethodField()
+    is_ended = serializers.SerializerMethodField()
+    hasAssignedSeating = serializers.BooleanField(source='has_assigned_seating', read_only=True)
+
+    class Meta:
+        model = Event
+        fields = (
+            'id', 'title', 'organizer', 'organizerLogo', 'organizer_logo',
+            'organizerHandle', 'organizer_handle', 'organizerBio', 'organizerWebsite', 'organizerInstagram',
+            'category', 'date', 'dateFormatted',
+            'time', 'start_time', 'startTime', 'end_time', 'endTime',
+            'city', 'venue', 'venueName', 'venue_name', 'address', 'is_online',
+            'startingPrice', 'priceRange', 'image', 'banner', 'banner_image',
+            'status', 'isEnded', 'is_ended', 'is_featured', 'isBookmarked',
+            'likesCount', 'isLiked', 'commentsCount',
+            'has_assigned_seating', 'hasAssignedSeating'
+        )
+
+
+class PublicEventDetailSerializer(BaseEventSerializerMixin, serializers.ModelSerializer):
     """
     Public-safe event detail serializer for attendee stage viewing and booking.
     Uses PublicTicketTierSerializer to hide gross sales and sold counts.
@@ -332,60 +394,6 @@ class PublicEventDetailSerializer(serializers.ModelSerializer):
             'auto_refund_cancelled_events', 'autoRefundCancelledEvents',
         )
 
-    def get_status(self, obj):
-        return obj.computed_status
-
-    def get_isEnded(self, obj):
-        return obj.is_ended
-
-    def get_is_ended(self, obj):
-        return obj.is_ended
-
-    def get_image(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_banner(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_banner_image(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_organizer(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['name']
-
-    def get_organizerLogo(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['logo']
-
-    def get_organizer_logo(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['logo']
-
-    def get_organizerHandle(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['handle']
-
-    def get_organizer_handle(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['handle']
-
-    def get_organizerBio(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['bio']
-
-    def get_organizerWebsite(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['website']
-
-    def get_organizerInstagram(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['instagram']
-
-    def get_time(self, obj):
-        return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
-
-    def get_dateFormatted(self, obj):
-        return obj.date.strftime('%b %d, %Y') if obj.date else ''
-
-    def get_startTime(self, obj):
-        return obj.start_time.strftime('%H:%M') if obj.start_time else ''
-
-    def get_endTime(self, obj):
-        return obj.end_time.strftime('%H:%M') if obj.end_time else ''
-
     def get_startingPrice(self, obj):
         tiers = obj.tiers.all()
         if not tiers.exists():
@@ -393,36 +401,11 @@ class PublicEventDetailSerializer(serializers.ModelSerializer):
         min_price = min(t.price for t in tiers)
         return f"${min_price:,.2f}"
 
-    def get_priceRange(self, obj):
-        tiers = obj.tiers.all()
-        if not tiers.exists():
-            return 'Free'
-        prices = [t.price for t in tiers]
-        min_p, max_p = min(prices), max(prices)
-        if min_p == max_p:
-            return f"${min_p:,.2f}" if min_p > 0 else 'Free'
-        return f"${min_p:,.0f} – ${max_p:,.0f}"
 
-    def get_isBookmarked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return SavedEvent.objects.filter(user=request.user, event=obj).exists()
-        return False
-
-    def get_likesCount(self, obj):
-        return obj.likes.count()
-
-    def get_isLiked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.likes.filter(user=request.user).exists()
-        return False
-
-    def get_commentsCount(self, obj):
-        return obj.comments.filter(is_deleted=False).count()
-
-
-class EventListSerializer(serializers.ModelSerializer):
+class EventListSerializer(ManagerEventSerializerMixin, serializers.ModelSerializer):
+    """
+    Manager-level event list serializer with full real-time sales, capacity, and revenue stats.
+    """
     organizer = serializers.SerializerMethodField()
     organizerLogo = serializers.SerializerMethodField()
     organizer_logo = serializers.SerializerMethodField()
@@ -481,150 +464,11 @@ class EventListSerializer(serializers.ModelSerializer):
             'userRole', 'staffPermissions'
         )
 
-    def get_status(self, obj):
-        return obj.computed_status
 
-    def get_isEnded(self, obj):
-        return obj.is_ended
-
-    def get_is_ended(self, obj):
-        return obj.is_ended
-
-    def get_image(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_banner(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_banner_image(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_organizer(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['name']
-
-    def get_organizerLogo(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['logo']
-
-    def get_organizer_logo(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['logo']
-
-    def get_organizerHandle(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['handle']
-
-    def get_organizer_handle(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['handle']
-
-    def get_organizerBio(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['bio']
-
-    def get_organizerWebsite(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['website']
-
-    def get_organizerInstagram(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['instagram']
-
-    def get_time(self, obj):
-        return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
-
-    def get_date(self, obj):
-        return str(obj.date) if obj.date else ''
-
-    def get_dateFormatted(self, obj):
-        return obj.date.strftime('%b %d, %Y') if obj.date else ''
-
-    def get_startTime(self, obj):
-        return obj.start_time.strftime('%H:%M') if obj.start_time else ''
-
-    def get_endTime(self, obj):
-        return obj.end_time.strftime('%H:%M') if obj.end_time else ''
-
-    def get_startingPrice(self, obj):
-        tiers = obj.tiers.all()
-        if not tiers.exists():
-            return 'Free'
-        min_price = min(t.price for t in tiers)
-        return f"${min_price:,.2f}" if min_price > 0 else 'Free Entry'
-
-    def get_spotsLeft(self, obj):
-        if obj.has_assigned_seating and obj.seats.exists():
-            total_capacity = obj.seats.count()
-            total_sold = obj.seats.filter(status='booked').count()
-            return max(0, total_capacity - total_sold)
-        tiers = obj.tiers.all()
-        total_capacity = sum(t.capacity for t in tiers)
-        total_sold = sum(t.sold_count for t in tiers)
-        return max(0, total_capacity - total_sold)
-
-    def get_ticketsSold(self, obj):
-        if obj.has_assigned_seating and obj.seats.exists():
-            return obj.seats.filter(status='booked').count()
-        return sum(t.sold_count for t in obj.tiers.all())
-
-    def get_totalCapacity(self, obj):
-        if obj.has_assigned_seating and obj.seats.exists():
-            return obj.seats.count()
-        return sum(t.capacity for t in obj.tiers.all())
-
-    def get_priceRange(self, obj):
-        tiers = obj.tiers.all()
-        if not tiers.exists():
-            return 'Free'
-        prices = [t.price for t in tiers]
-        min_p, max_p = min(prices), max(prices)
-        if min_p == max_p:
-            return f"${min_p:,.2f}" if min_p > 0 else 'Free'
-        return f"${min_p:,.0f} – ${max_p:,.0f}"
-
-    def get_grossRevenue(self, obj):
-        tiers = obj.tiers.all()
-        total = sum(t.price * t.sold_count for t in tiers)
-        return f"${total:,.2f}"
-
-    def get_isBookmarked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return SavedEvent.objects.filter(user=request.user, event=obj).exists()
-        return False
-
-    def get_likesCount(self, obj):
-        return obj.likes.count()
-
-    def get_isLiked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.likes.filter(user=request.user).exists()
-        return False
-
-    def get_commentsCount(self, obj):
-        return obj.comments.filter(is_deleted=False).count()
-
-    def get_userRole(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            if obj.organizer_id == request.user.id:
-                return 'owner'
-            from .models import EventStaff
-            if EventStaff.objects.filter(event=obj, user=request.user).exists():
-                return 'staff'
-        return 'attendee'
-
-    def get_staffPermissions(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            if obj.organizer_id == request.user.id:
-                return {'can_view_attendees': True, 'can_check_in': True, 'can_edit_attendees': True}
-            from .models import EventStaff
-            staff = EventStaff.objects.filter(event=obj, user=request.user).first()
-            if staff:
-                return {
-                    'can_view_attendees': staff.can_view_attendees,
-                    'can_check_in': staff.can_check_in,
-                    'can_edit_attendees': staff.can_edit_attendees,
-                }
-        return None
-
-
-class EventDetailSerializer(serializers.ModelSerializer):
+class EventDetailSerializer(ManagerEventSerializerMixin, serializers.ModelSerializer):
+    """
+    Manager-level detailed event serializer with nested tiers, seating, policies, and permissions.
+    """
     organizer = serializers.SerializerMethodField()
     organizerLogo = serializers.SerializerMethodField()
     organizer_logo = serializers.SerializerMethodField()
@@ -683,134 +527,12 @@ class EventDetailSerializer(serializers.ModelSerializer):
             'userRole', 'staffPermissions'
         )
 
-    def get_status(self, obj):
-        return obj.computed_status
-
-    def get_isEnded(self, obj):
-        return obj.is_ended
-
-    def get_is_ended(self, obj):
-        return obj.is_ended
-
-    def get_image(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_banner(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_banner_image(self, obj):
-        return resolve_image_url(obj.banner_image, self.context.get('request'))
-
-    def get_organizer(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['name']
-
-    def get_organizerLogo(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['logo']
-
-    def get_organizer_logo(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['logo']
-
-    def get_organizerHandle(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['handle']
-
-    def get_organizer_handle(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['handle']
-
-    def get_organizerBio(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['bio']
-
-    def get_organizerWebsite(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['website']
-
-    def get_organizerInstagram(self, obj):
-        return extract_organizer_details(obj, self.context.get('request'))['instagram']
-
-    def get_time(self, obj):
-        return obj.start_time.strftime('%I:%M %p') if obj.start_time else ''
-
-    def get_dateFormatted(self, obj):
-        return obj.date.strftime('%b %d, %Y') if obj.date else ''
-
-    def get_startTime(self, obj):
-        return obj.start_time.strftime('%H:%M') if obj.start_time else ''
-
-    def get_endTime(self, obj):
-        return obj.end_time.strftime('%H:%M') if obj.end_time else ''
-
     def get_startingPrice(self, obj):
         tiers = obj.tiers.all()
         if not tiers.exists():
             return '$0.00'
         min_price = min(t.price for t in tiers)
         return f"${min_price:,.2f}"
-
-    def get_spotsLeft(self, obj):
-        if obj.has_assigned_seating and obj.seats.exists():
-            total_capacity = obj.seats.count()
-            total_sold = obj.seats.filter(status='booked').count()
-            return max(0, total_capacity - total_sold)
-        tiers = obj.tiers.all()
-        total_capacity = sum(t.capacity for t in tiers)
-        total_sold = sum(t.sold_count for t in tiers)
-        return max(0, total_capacity - total_sold)
-
-    def get_ticketsSold(self, obj):
-        if obj.has_assigned_seating and obj.seats.exists():
-            return obj.seats.filter(status='booked').count()
-        return sum(t.sold_count for t in obj.tiers.all())
-
-    def get_totalCapacity(self, obj):
-        if obj.has_assigned_seating and obj.seats.exists():
-            return obj.seats.count()
-        return sum(t.capacity for t in obj.tiers.all())
-
-    def get_grossRevenue(self, obj):
-        tiers = obj.tiers.all()
-        total = sum(t.price * t.sold_count for t in tiers)
-        return f"${total:,.2f}"
-
-    def get_isBookmarked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return SavedEvent.objects.filter(user=request.user, event=obj).exists()
-        return False
-
-    def get_likesCount(self, obj):
-        return obj.likes.count()
-
-    def get_isLiked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.likes.filter(user=request.user).exists()
-        return False
-
-    def get_commentsCount(self, obj):
-        return obj.comments.filter(is_deleted=False).count()
-
-    def get_userRole(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            if obj.organizer_id == request.user.id:
-                return 'owner'
-            from .models import EventStaff
-            if EventStaff.objects.filter(event=obj, user=request.user).exists():
-                return 'staff'
-        return 'attendee'
-
-    def get_staffPermissions(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            if obj.organizer_id == request.user.id:
-                return {'can_view_attendees': True, 'can_check_in': True, 'can_edit_attendees': True}
-            from .models import EventStaff
-            staff = EventStaff.objects.filter(event=obj, user=request.user).first()
-            if staff:
-                return {
-                    'can_view_attendees': staff.can_view_attendees,
-                    'can_check_in': staff.can_check_in,
-                    'can_edit_attendees': staff.can_edit_attendees,
-                }
-        return None
 
 
 ManagerEventListSerializer = EventListSerializer

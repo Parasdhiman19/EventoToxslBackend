@@ -39,6 +39,8 @@ from .views import (
     SettlementAccountDetailView,
     StudioStaffListView,
     StudioStaffDetailView,
+    UserSupportTicketListView,
+    UserSupportTicketDetailView,
 )
 
 urlpatterns = [
@@ -110,5 +112,13 @@ urlpatterns = [
     # POST: Adds/invites a user to the organizer's studio staff roster
     path('studio-staff/', StudioStaffListView.as_view(), name='studio_staff_list'),
     path('studio-staff/<int:pk>/', StudioStaffDetailView.as_view(), name='studio_staff_detail'),
+
+    # -------------------------------------------------------------------------
+    # User Support & Problem Reporting (Authenticated)
+    # -------------------------------------------------------------------------
+    # GET: Lists all support tickets & problem reports filed by the logged-in user
+    # POST: Submits a new problem message / support inquiry to the Super Admin
+    path('support/', UserSupportTicketListView.as_view(), name='user_support_tickets'),
+    path('support/<int:pk>/', UserSupportTicketDetailView.as_view(), name='user_support_ticket_detail'),
 ]
 

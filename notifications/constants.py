@@ -31,6 +31,9 @@ PAYOUT_FAILED = 'PAYOUT_FAILED'
 # Manager — Account
 ORGANIZER_PROFILE_ACTIVATED = 'ORGANIZER_PROFILE_ACTIVATED'
 
+# Support & Moderation
+SUPPORT_TICKET_UPDATED = 'SUPPORT_TICKET_UPDATED'
+
 NOTIFICATION_TYPE_CHOICES = (
     (WELCOME, 'Welcome to Evento'),
     (PASSWORD_CHANGED, 'Password Changed'),
@@ -49,4 +52,6 @@ NOTIFICATION_TYPE_CHOICES = (
     (PAYOUT_DISBURSED, 'Payout Disbursed'),
     (PAYOUT_FAILED, 'Payout Failed'),
     (ORGANIZER_PROFILE_ACTIVATED, 'Organizer Profile Activated'),
+    (SUPPORT_TICKET_UPDATED, 'Support Ticket Updated'),
 )
+

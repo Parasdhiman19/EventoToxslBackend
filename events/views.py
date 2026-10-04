@@ -1,23 +1,31 @@
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Q
+from django.core.paginator import Paginator, EmptyPage
+from django.contrib.auth import get_user_model
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from django.db.models import Q
 
 from accounts.permissions import IsManagerUser
-from .models import Event, SavedEvent, EventLike, EventComment, CommentLike
+from .models import Event, EventStaff, SavedEvent, EventLike, EventComment, CommentLike
 from .utils.media_utils import upload_image_to_cloudinary
+from .services.seating_service import sync_seating_layout_to_db
 from .serializers import (
     PublicEventListSerializer,
     PublicEventDetailSerializer,
     ManagerEventListSerializer,
     ManagerEventDetailSerializer,
-    EventListSerializer,
-    EventDetailSerializer,
     EventCreateUpdateSerializer,
     CommentSerializer,
     CommentCreateSerializer,
+    EventStaffSerializer,
+    AddEventStaffSerializer,
+    BulkAssignEventStaffSerializer,
+    StaffUserSearchSerializer,
+    StaffAssignedEventSerializer,
+    SeatSerializer,
+    TicketTierSerializer,
 )
 
 
@@ -83,7 +91,6 @@ class PublicEventListView(views.APIView):
                 page_size = 10
 
             page_size = max(1, min(page_size, 50))
-            from django.core.paginator import Paginator, EmptyPage
             paginator = Paginator(queryset, page_size)
             try:
                 page_obj = paginator.page(page_num)
@@ -215,7 +222,6 @@ class ManagerEventDetailView(views.APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self, pk, user):
-        from .models import EventStaff
         return Event.objects.filter(
             Q(pk=pk, organizer=user) | Q(pk=pk, staff_members__user=user)
         ).distinct().first()
@@ -348,9 +354,6 @@ class ManagerEventStaffListView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def get(self, request, event_id):
-        from .models import EventStaff
-        from .serializers import EventStaffSerializer
-
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -359,8 +362,6 @@ class ManagerEventStaffListView(views.APIView):
         return Response(EventStaffSerializer(staff_members, many=True).data)
 
     def post(self, request, event_id):
-        from .serializers import AddEventStaffSerializer, EventStaffSerializer
-
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -382,9 +383,6 @@ class ManagerEventStaffDetailView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def patch(self, request, event_id, staff_id):
-        from .models import EventStaff
-        from .serializers import EventStaffSerializer
-
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -407,8 +405,6 @@ class ManagerEventStaffDetailView(views.APIView):
         return Response(EventStaffSerializer(staff).data)
 
     def delete(self, request, event_id, staff_id):
-        from .models import EventStaff
-
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -428,8 +424,6 @@ class ManagerEventStaffBulkAssignView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def post(self, request, event_id):
-        from .serializers import BulkAssignEventStaffSerializer, EventStaffSerializer
-
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -448,9 +442,6 @@ class ManagerUserSearchView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def get(self, request):
-        from django.contrib.auth import get_user_model
-        from .serializers import StaffUserSearchSerializer
-
         User = get_user_model()
         query = (request.query_params.get('q') or '').strip()
 
@@ -567,9 +558,6 @@ class StaffAssignedEventsListView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        from .models import EventStaff
-        from .serializers import StaffAssignedEventSerializer
-
         assigned_event_ids = EventStaff.objects.filter(user=request.user).values_list('event_id', flat=True)
         events = Event.objects.filter(id__in=assigned_event_ids).order_by('-date')
 
@@ -596,7 +584,6 @@ class ManagerEventSeatingView(views.APIView):
     permission_classes = [IsManagerUser]
 
     def get(self, request, event_id):
-        from .serializers import SeatSerializer, TicketTierSerializer
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -612,7 +599,6 @@ class ManagerEventSeatingView(views.APIView):
         })
 
     def post(self, request, event_id):
-        from .serializers import sync_seating_layout_to_db, SeatSerializer, TicketTierSerializer
         event = Event.objects.filter(pk=event_id, organizer=request.user).first()
         if not event:
             return Response({'detail': 'Event not found or unauthorized.'}, status=status.HTTP_404_NOT_FOUND)
@@ -642,7 +628,6 @@ class PublicEventSeatingView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, event_id):
-        from .serializers import SeatSerializer, TicketTierSerializer
         event = Event.objects.filter(pk=event_id).first()
         if not event:
             return Response({'detail': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)

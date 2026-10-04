@@ -96,10 +96,12 @@ class AuditLogSerializer(serializers.ModelSerializer):
 
 class PlatformReportSerializer(serializers.ModelSerializer):
     reporterEmail = serializers.SerializerMethodField()
+    reporterName = serializers.SerializerMethodField()
+    reporterRole = serializers.SerializerMethodField()
     resolvedByEmail = serializers.SerializerMethodField()
-    reportType = serializers.CharField(source='report_type')
-    targetModel = serializers.CharField(source='target_model')
-    targetId = serializers.CharField(source='target_id')
+    reportType = serializers.CharField(source='report_type', required=False, default='support')
+    targetModel = serializers.CharField(source='target_model', required=False, default='Platform')
+    targetId = serializers.CharField(source='target_id', required=False, allow_blank=True, default='')
     resolutionNotes = serializers.CharField(source='resolution_notes', required=False, allow_blank=True)
     resolvedAt = serializers.DateTimeField(source='resolved_at', read_only=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
@@ -107,13 +109,27 @@ class PlatformReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = PlatformReport
         fields = (
-            'id', 'reporterEmail', 'reportType', 'targetModel', 'targetId',
-            'reason', 'details', 'status', 'resolvedByEmail', 'resolutionNotes',
-            'resolvedAt', 'createdAt'
+            'id', 'reporterEmail', 'reporterName', 'reporterRole', 'reportType',
+            'targetModel', 'targetId', 'reason', 'details', 'status',
+            'resolvedByEmail', 'resolutionNotes', 'resolvedAt', 'createdAt'
         )
 
     def get_reporterEmail(self, obj):
         return obj.reporter.email if obj.reporter else 'Anonymous'
+
+    def get_reporterName(self, obj):
+        if not obj.reporter:
+            return 'Anonymous'
+        return getattr(obj.reporter, 'full_name', '') or getattr(obj.reporter, 'username', '') or obj.reporter.email
+
+    def get_reporterRole(self, obj):
+        if not obj.reporter:
+            return 'Guest'
+        if obj.reporter.is_superuser or obj.reporter.is_staff:
+            return 'Super Admin'
+        if hasattr(obj.reporter, 'organizer_profile'):
+            return 'Organizer'
+        return 'Attendee'
 
     def get_resolvedByEmail(self, obj):
         return obj.resolved_by.email if obj.resolved_by else None

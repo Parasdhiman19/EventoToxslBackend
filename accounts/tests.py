@@ -246,5 +246,37 @@ class AccountsAuthTests(TestCase):
         })
         self.assertEqual(new_login.status_code, status.HTTP_200_OK)
 
+    def test_user_support_tickets_crud(self):
+        login_res = self.client.post('/api/auth/login/', {
+            'email': 'testuser@evento.com',
+            'password': 'Password123!'
+        })
+        token = login_res.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        # 1. Post a new support ticket
+        post_res = self.client.post('/api/auth/support/', {
+            'reason': 'Trouble downloading my QR ticket',
+            'details': 'The ticket PDF is not opening properly on my mobile device.',
+            'reportType': 'bug',
+            'targetModel': 'Ticket'
+        }, format='json')
+        self.assertEqual(post_res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(post_res.data['reason'], 'Trouble downloading my QR ticket')
+        self.assertEqual(post_res.data['status'], 'Pending')
+        ticket_id = post_res.data['id']
+
+        # 2. List user support tickets
+        list_res = self.client.get('/api/auth/support/')
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_res.data), 1)
+        self.assertEqual(list_res.data[0]['id'], ticket_id)
+
+        # 3. Retrieve specific support ticket
+        get_res = self.client.get(f'/api/auth/support/{ticket_id}/')
+        self.assertEqual(get_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_res.data['id'], ticket_id)
+
+
 
 
