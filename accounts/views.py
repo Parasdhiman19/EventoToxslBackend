@@ -44,12 +44,14 @@ def get_tokens_for_user(user):
 
 
 def set_refresh_cookie(response, refresh_token):
+    from django.conf import settings
+    is_prod = not getattr(settings, 'DEBUG', True) or os.environ.get('RENDER') == 'true' or os.environ.get('RENDER_EXTERNAL_HOSTNAME') is not None
     response.set_cookie(
         key='refresh_token',
         value=refresh_token,
         httponly=True,
-        samesite='Lax',
-        secure=False,  # Set to True in HTTPS production
+        samesite='None' if is_prod else 'Lax',
+        secure=is_prod,
         max_age=COOKIE_MAX_AGE,
         path='/',
     )
@@ -250,6 +252,7 @@ class VerifySignupOTPView(views.APIView):
         response = Response({
             'user': UserSerializer(user).data,
             'access': tokens['access'],
+            'refresh': tokens['refresh'],
             'message': 'Account verified and created successfully.'
         }, status=status.HTTP_201_CREATED)
 
@@ -634,10 +637,11 @@ class LoginView(views.APIView):
             response = Response({
                 'user': UserSerializer(user).data,
                 'access': tokens['access'],
+                'refresh': tokens['refresh'],
                 'message': 'Logged in successfully.'
             }, status=status.HTTP_200_OK)
 
-            # Store refresh token exclusively in HttpOnly cookie
+            # Store refresh token in HttpOnly cookie
             set_refresh_cookie(response, tokens['refresh'])
             return response
 
@@ -646,11 +650,14 @@ class LoginView(views.APIView):
 
 class CustomTokenRefreshView(views.APIView):
     """
-    Reads the refresh token from HttpOnly cookie and returns a fresh access token.
+    Reads the refresh token from HttpOnly cookie OR request body and returns a fresh access token.
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        from django.conf import settings
+        is_prod = not getattr(settings, 'DEBUG', True) or os.environ.get('RENDER') == 'true' or os.environ.get('RENDER_EXTERNAL_HOSTNAME') is not None
+
         refresh_token = (
             request.COOKIES.get('refresh_token') or 
             request.data.get('refresh') or 
@@ -660,24 +667,32 @@ class CustomTokenRefreshView(views.APIView):
 
         if not refresh_token:
             return Response(
-                {'detail': 'Authentication refresh cookie not found.'},
+                {'detail': 'Authentication refresh token not found.'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
 
         try:
             refresh = RefreshToken(refresh_token)
             new_access_token = str(refresh.access_token)
+            new_refresh_token = str(refresh)
 
             response = Response({
                 'access': new_access_token,
+                'refresh': new_refresh_token,
             }, status=status.HTTP_200_OK)
+            set_refresh_cookie(response, new_refresh_token)
             return response
         except (TokenError, InvalidToken):
             response = Response(
                 {'detail': 'Refresh token is invalid or expired.'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
-            response.delete_cookie('refresh_token', path='/')
+            response.delete_cookie(
+                'refresh_token',
+                path='/',
+                samesite='None' if is_prod else 'Lax',
+                secure=is_prod
+            )
             return response
 
 
@@ -688,8 +703,15 @@ class LogoutView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        from django.conf import settings
+        is_prod = not getattr(settings, 'DEBUG', True) or os.environ.get('RENDER') == 'true' or os.environ.get('RENDER_EXTERNAL_HOSTNAME') is not None
         response = Response({'message': 'Logged out successfully.'}, status=status.HTTP_200_OK)
-        response.delete_cookie('refresh_token', path='/')
+        response.delete_cookie(
+            'refresh_token',
+            path='/',
+            samesite='None' if is_prod else 'Lax',
+            secure=is_prod
+        )
         return response
 
 
