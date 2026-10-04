@@ -224,24 +224,31 @@ class OrderSerializer(serializers.ModelSerializer):
 class CheckoutSerializer(serializers.Serializer):
     eventId = serializers.IntegerField(required=False)
     event_id = serializers.IntegerField(required=False)
-    tierId = serializers.IntegerField(required=False)
-    tier_id = serializers.IntegerField(required=False)
-    seatIds = serializers.ListField(child=serializers.IntegerField(), required=False)
-    seat_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    tierId = serializers.IntegerField(required=False, allow_null=True)
+    tier_id = serializers.IntegerField(required=False, allow_null=True)
+    seatIds = serializers.ListField(required=False, allow_empty=True)
+    seat_ids = serializers.ListField(required=False, allow_empty=True)
     quantity = serializers.IntegerField(min_value=1, default=1)
-    paymentMethod = serializers.CharField(required=False, default='UPI • Axis Bank')
-    payment_method = serializers.CharField(required=False, default='UPI • Axis Bank')
+    paymentMethod = serializers.CharField(required=False, default='Instant Confirmation Pass')
+    payment_method = serializers.CharField(required=False, default='Instant Confirmation Pass')
     attendeeName = serializers.CharField(required=False, allow_blank=True)
     attendee_name = serializers.CharField(required=False, allow_blank=True)
     attendeeEmail = serializers.EmailField(required=False, allow_blank=True)
     attendee_email = serializers.EmailField(required=False, allow_blank=True)
 
     def validate(self, attrs):
-        from events.models import Seat
+        from events.models import Seat, TicketTier
+        from decimal import Decimal
 
         event_id = attrs.get('eventId') or attrs.get('event_id')
         tier_id = attrs.get('tierId') or attrs.get('tier_id')
-        seat_ids = attrs.get('seatIds') or attrs.get('seat_ids') or []
+        raw_seats = attrs.get('seatIds') or attrs.get('seat_ids') or []
+        seat_ids = []
+        for sid in raw_seats:
+            try:
+                seat_ids.append(int(sid))
+            except (ValueError, TypeError):
+                continue
 
         if not event_id:
             raise serializers.ValidationError({"eventId": "Event ID is required."})
@@ -256,6 +263,9 @@ class CheckoutSerializer(serializers.Serializer):
         if event.is_ended or event.status == 'past':
             raise serializers.ValidationError({"eventId": "This event has ended and tickets can no longer be purchased."})
 
+        req = self.context.get('request')
+        user = req.user if (req and req.user and req.user.is_authenticated) else attrs.get('user')
+
         # If seats are selected
         seat_objs = []
         if seat_ids:
@@ -264,7 +274,6 @@ class CheckoutSerializer(serializers.Serializer):
                 raise serializers.ValidationError({"seatIds": "One or more selected seats could not be found for this event."})
 
             now_dt = timezone.now()
-            user = self.context.get('request').user if (self.context.get('request') and self.context.get('request').user.is_authenticated) else None
             for s in seat_objs:
                 is_available = (
                     s.status == 'available' or
@@ -279,20 +288,38 @@ class CheckoutSerializer(serializers.Serializer):
             if not tier_id and seat_objs[0].tier:
                 tier = seat_objs[0].tier
             elif tier_id:
-                tier = TicketTier.objects.filter(pk=tier_id, event=event).first()
+                tier = TicketTier.objects.filter(pk=tier_id, event=event).first() or seat_objs[0].tier or event.tiers.first()
             else:
                 tier = event.tiers.first()
+
+            if not tier:
+                tier, _ = TicketTier.objects.get_or_create(
+                    event=event,
+                    name='Assigned Seat Tier',
+                    defaults={'price': Decimal('0.00'), 'capacity': 100}
+                )
         else:
             if not tier_id:
-                raise serializers.ValidationError({"tierId": "Ticket tier ID is required."})
-            tier = TicketTier.objects.filter(pk=tier_id, event=event).first()
+                tier = event.tiers.first()
+                if not tier:
+                    tier, _ = TicketTier.objects.get_or_create(
+                        event=event,
+                        name='General Admission',
+                        defaults={'price': Decimal('0.00'), 'capacity': 100}
+                    )
+            else:
+                tier = TicketTier.objects.filter(pk=tier_id, event=event).first()
+                if not tier:
+                    tier = event.tiers.first()
+
             if not tier:
                 raise serializers.ValidationError({"tierId": "Ticket tier not found for this event."})
 
             quantity = attrs.get('quantity', 1)
-            remaining = tier.capacity - tier.sold_count
-            if quantity > remaining:
-                raise serializers.ValidationError({"quantity": f"Only {remaining} tickets remaining in this tier."})
+            if tier.capacity > 0:
+                remaining = max(0, tier.capacity - tier.sold_count)
+                if quantity > remaining:
+                    raise serializers.ValidationError({"quantity": f"Only {remaining} tickets remaining in this tier."})
 
         attrs['event_obj'] = event
         attrs['tier_obj'] = tier

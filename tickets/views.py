@@ -25,10 +25,10 @@ class CheckoutView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        serializer = CheckoutSerializer(data=request.data)
+        serializer = CheckoutSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             order = serializer.save(user=request.user)
-            return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+            return Response(OrderSerializer(order, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -708,7 +708,8 @@ class PayPalCaptureOrderView(views.APIView):
             return Response({'detail': 'PayPal Order ID missing from transaction.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Check seat reservation hold for assigned seating events before capturing
-        if order.event.has_assigned_seating:
+        has_held_seats = Seat.objects.filter(order=order).exists()
+        if order.event.has_assigned_seating and has_held_seats:
             held_seats_count = Seat.objects.filter(order=order, status='reserved').count()
             if held_seats_count < order.quantity:
                 return Response({
@@ -741,7 +742,7 @@ class PayPalCaptureOrderView(views.APIView):
                     # Finalize reserved seats if any
                     tier_counts = {}
 
-                    if order.event.has_assigned_seating:
+                    if order.event.has_assigned_seating and has_held_seats:
                         reserved_seats = list(Seat.objects.select_for_update().filter(order=order))
                         for i, seat in enumerate(reserved_seats):
                             seat_tier = seat.tier or order.tier

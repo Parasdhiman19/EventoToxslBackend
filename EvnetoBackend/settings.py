@@ -115,6 +115,11 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.vercel\.app$",
     r"^https:\/\/.*\.onrender\.com$",
+    r"^http:\/\/192\.168\.\d+\.\d+(:\d+)?$",
+    r"^http:\/\/10\.\d+\.\d+\.\d+(:\d+)?$",
+    r"^http:\/\/172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+(:\d+)?$",
+    r"^http:\/\/localhost(:\d+)?$",
+    r"^http:\/\/127\.0\.0\.1(:\d+)?$",
 ]
 
 extra_cors = os.environ.get('CORS_ALLOWED_ORIGINS', '')
@@ -131,6 +136,11 @@ CSRF_TRUSTED_ORIGINS = [
 CSRF_TRUSTED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.vercel\.app$",
     r"^https:\/\/.*\.onrender\.com$",
+    r"^http:\/\/192\.168\.\d+\.\d+(:\d+)?$",
+    r"^http:\/\/10\.\d+\.\d+\.\d+(:\d+)?$",
+    r"^http:\/\/172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+(:\d+)?$",
+    r"^http:\/\/localhost(:\d+)?$",
+    r"^http:\/\/127\.0\.0\.1(:\d+)?$",
 ]
 
 extra_csrf = os.environ.get('CSRF_TRUSTED_ORIGINS', '')
@@ -162,8 +172,11 @@ WSGI_APPLICATION = 'EvnetoBackend.wsgi.application'
 # Database Configuration (Supports Render Managed PostgreSQL via DATABASE_URL)
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 import dj_database_url
-DATABASE_URL = os.environ.get('DATABASE_URL')
-if DATABASE_URL:
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
+is_render = os.environ.get('RENDER') == 'true' or os.environ.get('RENDER_EXTERNAL_HOSTNAME') is not None
+
+# Render internal private hostnames (dpg-*) only resolve inside Render's cloud environment
+if DATABASE_URL and (is_render or 'dpg-' not in DATABASE_URL or 'render.com' in DATABASE_URL):
     DATABASES = {
         'default': dj_database_url.config(
             default=DATABASE_URL,

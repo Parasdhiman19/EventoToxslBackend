@@ -13,15 +13,24 @@ from .services.staff_service import sync_event_staff_ids, sync_event_staff_ids a
 class PublicTicketTierSerializer(serializers.ModelSerializer):
     """
     Public-safe ticket tier serializer for attendee discovery and booking.
-    Excludes soldCount, gross earnings, and internal inventory limits.
+    Includes capacity & remaining availability for pass selection without exposing gross sales metrics.
     """
     tierName = serializers.CharField(source='name', read_only=True)
+    soldCount = serializers.IntegerField(source='sold_count', read_only=True)
+    remainingSpots = serializers.SerializerMethodField()
     isSoldOut = serializers.SerializerMethodField()
     is_sold_out = serializers.SerializerMethodField()
 
     class Meta:
         model = TicketTier
-        fields = ('id', 'name', 'tierName', 'price', 'description', 'isSoldOut', 'is_sold_out')
+        fields = (
+            'id', 'name', 'tierName', 'price', 'capacity',
+            'sold_count', 'soldCount', 'remainingSpots',
+            'description', 'isSoldOut', 'is_sold_out'
+        )
+
+    def get_remainingSpots(self, obj):
+        return max(0, obj.capacity - obj.sold_count) if obj.capacity > 0 else 0
 
     def get_isSoldOut(self, obj):
         return obj.capacity > 0 and obj.sold_count >= obj.capacity
