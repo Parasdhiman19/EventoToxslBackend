@@ -55,7 +55,14 @@ class PublicEventListView(views.APIView):
 
         category = request.query_params.get('category')
         if category and category != 'All':
-            queryset = queryset.filter(category__iexact=category)
+            if ',' in category:
+                cat_list = [c.strip() for c in category.split(',') if c.strip()]
+                cat_q = Q()
+                for c in cat_list:
+                    cat_q |= Q(category__iexact=c) | Q(category__icontains=c)
+                queryset = queryset.filter(cat_q)
+            else:
+                queryset = queryset.filter(Q(category__iexact=category) | Q(category__icontains=category))
 
         city = request.query_params.get('city')
         if city and city != 'All Cities':
@@ -75,8 +82,8 @@ class PublicEventListView(views.APIView):
             queryset = queryset.order_by('-created_at')
         elif sort_by == 'upcoming' or sort_by == 'date_asc':
             queryset = queryset.order_by('date', 'start_time')
-        elif sort_by == 'featured':
-            queryset = queryset.order_by('-is_featured', 'date', 'start_time')
+        elif sort_by in ['featured', 'trending', 'popular']:
+            queryset = queryset.order_by('-is_featured', '-is_recommended', 'date', 'start_time')
 
         page_param = request.query_params.get('page')
         if page_param:
