@@ -27,5 +27,8 @@ for email in ['admin@evento.com', 'superadmin@evento.com']:
 print('==> Super Admin verified!')
 "
 
+echo "==> Seeding rich platform demo data (100 events, organizers, attendees, seat maps)..."
+python manage.py seed_100_events
+
 echo "==> Build completed successfully!"
 

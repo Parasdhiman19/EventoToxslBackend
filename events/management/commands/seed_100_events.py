@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from accounts.models import User, OrganizerProfile
-from events.models import Event, TicketTier, SavedEvent, EventLike
+from events.models import Event, TicketTier, SavedEvent, EventLike, Seat
 
 ORGANIZERS_DATA = [
     {
@@ -454,7 +454,15 @@ class Command(BaseCommand):
                     'banner_priority': 100 - i if is_hero else 0,
                     'is_recommended': is_recommended,
                     'recommendation_badge': badge,
-                    'has_assigned_seating': False,
+                    'has_assigned_seating': (i % 2 == 0),
+                    'seating_layout': {
+                        'dimensions': {'rows': 6, 'columns': 10},
+                        'aisles': [3, 8],
+                        'tiers': [
+                            {'name': 'VIP Priority Access', 'color': '#f59e0b'},
+                            {'name': 'General Admission', 'color': '#059669'},
+                        ]
+                    } if (i % 2 == 0) else {},
                 }
             )
 
@@ -462,9 +470,9 @@ class Command(BaseCommand):
                 created_count += 1
 
             # Ensure ticket tiers exist
-            if not event.tiers.exists():
-                # Tier 1: General
-                TicketTier.objects.create(
+            gen_tier = event.tiers.filter(name='General Admission').first()
+            if not gen_tier:
+                gen_tier = TicketTier.objects.create(
                     event=event,
                     name='General Admission',
                     price=Decimal(str(min_p)),
@@ -472,26 +480,48 @@ class Command(BaseCommand):
                     sold_count=rng.randint(5, 50),
                     description='Standard entrance pass with full stage viewing access.',
                 )
-                # Tier 2: VIP / Early Bird
-                if max_p > min_p:
-                    TicketTier.objects.create(
-                        event=event,
-                        name='VIP Priority Access',
-                        price=Decimal(str(max_p)),
-                        capacity=rng.randint(25, 80),
-                        sold_count=rng.randint(2, 20),
-                        description='Fast-track entry lane, lounge access, and complimentary refreshments.',
-                    )
-                # Tier 3: Occasional Student / Early release
-                if i % 3 == 0:
-                    TicketTier.objects.create(
-                        event=event,
-                        name='Early Bird Pass',
-                        price=Decimal(str(max(0, min_p - 10))),
-                        capacity=rng.randint(40, 100),
-                        sold_count=rng.randint(10, 40),
-                        description='Discounted early admission pass for first 50 buyers.',
-                    )
+
+            vip_tier = event.tiers.filter(name='VIP Priority Access').first()
+            if not vip_tier and max_p > min_p:
+                vip_tier = TicketTier.objects.create(
+                    event=event,
+                    name='VIP Priority Access',
+                    price=Decimal(str(max_p)),
+                    capacity=rng.randint(25, 80),
+                    sold_count=rng.randint(2, 20),
+                    description='Fast-track entry lane, lounge access, and complimentary refreshments.',
+                )
+
+            if i % 3 == 0 and not event.tiers.filter(name='Early Bird Pass').exists():
+                TicketTier.objects.create(
+                    event=event,
+                    name='Early Bird Pass',
+                    price=Decimal(str(max(0, min_p - 10))),
+                    capacity=rng.randint(40, 100),
+                    sold_count=rng.randint(10, 40),
+                    description='Discounted early admission pass for first 50 buyers.',
+                )
+
+            # Generate interactive seats if event has assigned seating
+            if event.has_assigned_seating and not event.seats.exists():
+                rows = ['A', 'B', 'C', 'D', 'E', 'F']
+                seats_to_create = []
+                for row_idx, row_label in enumerate(rows):
+                    tier_to_use = vip_tier if (row_idx < 2 and vip_tier) else gen_tier
+                    section = 'VIP Front Section' if (row_idx < 2) else 'Main Hall'
+                    for col in range(1, 11):
+                        is_booked = (rng.random() < 0.22)
+                        seats_to_create.append(
+                            Seat(
+                                event=event,
+                                tier=tier_to_use,
+                                section_name=section,
+                                row=row_label,
+                                seat_number=str(col),
+                                status='booked' if is_booked else 'available',
+                            )
+                        )
+                Seat.objects.bulk_create(seats_to_create, ignore_conflicts=True)
 
             # Add Saved Events for user@evento.com (save ~14 varied events)
             if i in [0, 1, 3, 5, 8, 12, 17, 24, 31, 40, 52, 68, 85]:
